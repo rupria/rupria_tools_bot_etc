@@ -39,6 +39,7 @@
 - `!watch branches owner/repo`와 `/github_branches`는 실제 GitHub 브랜치 목록과 현재 연결된 감시 상태를 함께 보여준다.
 - `DISCORD_ALLOWED_ROLE_IDS`를 넣으면 해당 역할만 명령을 쓸 수 있다.
 - `DISCORD_ADMIN_CHANNEL_ID`를 넣으면 그 채널에서만 명령을 받는다.
+- Discord 서버 관리자 권한이 있으면 서버/채널/역할 제한 없이 바로 사용할 수 있다.
 
 ## 환경 변수
 

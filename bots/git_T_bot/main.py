@@ -81,7 +81,14 @@ def get_all_watches() -> list[WatchTarget]:
     return dedupe_watches([*env_watches, *file_watches])
 
 
+def is_discord_administrator(member: object) -> bool:
+    permissions = getattr(member, "guild_permissions", None)
+    return bool(getattr(permissions, "administrator", False))
+
+
 def is_member_authorized(member: object) -> bool:
+    if is_discord_administrator(member):
+        return True
     if not settings.allowed_role_ids:
         return True
     author_roles = getattr(member, "roles", [])
@@ -91,6 +98,8 @@ def is_member_authorized(member: object) -> bool:
 def is_authorized(ctx: commands.Context[commands.Bot]) -> bool:
     if ctx.guild is None:
         return False
+    if is_discord_administrator(ctx.author):
+        return True
     if settings.guild_id and str(ctx.guild.id) != settings.guild_id:
         return False
     if settings.admin_channel_id and str(ctx.channel.id) != settings.admin_channel_id:
@@ -101,6 +110,8 @@ def is_authorized(ctx: commands.Context[commands.Bot]) -> bool:
 def is_interaction_authorized(interaction: discord.Interaction) -> bool:
     if interaction.guild is None or interaction.channel is None:
         return False
+    if is_discord_administrator(interaction.user):
+        return True
     if settings.guild_id and str(interaction.guild.id) != settings.guild_id:
         return False
     if settings.admin_channel_id and str(interaction.channel.id) != settings.admin_channel_id:
