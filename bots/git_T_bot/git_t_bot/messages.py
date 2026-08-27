@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 
 from .config import WatchTarget
-from .github_client import ChangedFileInfo, CommitInfo, CompareCommitInfo, CompareInfo
+from .github_client import BranchInfo, ChangedFileInfo, CommitInfo, CompareCommitInfo, CompareInfo
 
 
 def short_sha(value: str) -> str:
@@ -18,10 +18,6 @@ def truncate(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
     return f"{text[: max_length - 3]}..."
-
-
-def owner_name(repository: str) -> str:
-    return repository.split("/", 1)[0]
 
 
 def build_change_scale_text(compare_info: CompareInfo | None) -> str:
@@ -89,6 +85,10 @@ def build_file_summary_lines(compare_info: CompareInfo | None) -> list[str]:
     return lines
 
 
+def format_watch_user(user: str) -> str:
+    return "*" if user == "*" else f"@{user}"
+
+
 def build_commit_embed(
     watch: WatchTarget,
     previous_sha: str,
@@ -100,11 +100,12 @@ def build_commit_embed(
         links.append(f"[변경 보기]({compare_info.html_url})")
 
     embed = discord.Embed(
-        title=f"{watch.repository} · {watch.branch}",
+        title=watch.repository,
         url=compare_info.html_url if compare_info and compare_info.html_url else latest_commit.html_url,
         description="\n".join(
             [
-                f"감시 사용자: {owner_name(watch.repository)}",
+                f"브랜치 : {watch.branch}",
+                f"감지 사용자 : {format_watch_user(watch.user)}",
                 build_change_scale_text(compare_info),
                 " | ".join(links),
             ]
@@ -142,48 +143,120 @@ def build_help_text(prefix: str) -> str:
     return "\n".join(
         [
             "사용 가능한 명령",
-            f"{prefix}watch list",
-            f"{prefix}watch branches [owner/repo]",
-            f"{prefix}watch add owner/repo branch [#channel]",
-            f"{prefix}watch remove owner/repo branch [#channel]",
+            f"{prefix}watch list [repository] [branch] [user]",
+            f"{prefix}watch branches owner/repo [branch] [user]",
+            f"{prefix}watch add owner/repo branch [user] [#channel]",
+            f"{prefix}watch remove owner/repo branch [user] [#channel]",
             f"{prefix}watch check",
             f"{prefix}watch test [#channel]",
+            "/github_watches repository:* branch:* user:*",
+            "/github_branches repository:owner/repo branch:* user:*",
+            "/github_watch_add repository:owner/repo branch:main user:* channel:#alerts",
+            "/github_watch_remove repository:owner/repo branch:main user:* channel:#alerts",
         ]
     )
 
 
-def build_list_text(watches: list[WatchTarget]) -> str:
+def build_list_text(
+    watches: list[WatchTarget],
+    repository: str = "*",
+    branch: str = "*",
+    user: str = "*",
+) -> str:
     if not watches:
-        return "현재 등록된 감시 대상이 없습니다."
-    lines = [f"현재 감시 대상 {len(watches)}개"]
+        return "\n".join(
+            [
+                "조건과 일치하는 감시 대상이 없습니다.",
+                f"레포지토리 : {repository}",
+                f"브랜치 : {branch}",
+                f"감지 사용자 : {format_watch_user(user)}",
+            ]
+        )
+    lines = [
+        f"현재 감시 대상 {len(watches)}개",
+        f"레포지토리 : {repository}",
+        f"브랜치 : {branch}",
+        f"감지 사용자 : {format_watch_user(user)}",
+    ]
     for index, watch in enumerate(watches, start=1):
-        lines.append(f"{index}. {watch.repository} @ {watch.branch} -> <#{watch.channel_id}> [{watch.source}]")
+        lines.append(
+            f"{index}. {watch.repository} / {watch.branch} / {format_watch_user(watch.user)} -> <#{watch.channel_id}> [{watch.source}]"
+        )
     return "\n".join(lines)
 
 
-def build_branch_list_text(watches: list[WatchTarget], repository: str | None = None) -> str:
+def build_branch_list_text(
+    watches: list[WatchTarget],
+    repository: str | None = None,
+    branch: str = "*",
+    user: str = "*",
+) -> str:
     if not watches:
         if repository:
-            return f"감시 중인 저장소를 찾지 못했습니다.\n{repository}"
+            return "\n".join(
+                [
+                    "조건과 일치하는 감시 대상을 찾지 못했습니다.",
+                    f"레포지토리 : {repository}",
+                    f"브랜치 : {branch}",
+                    f"감지 사용자 : {format_watch_user(user)}",
+                ]
+            )
         return "현재 등록된 감시 대상이 없습니다."
 
     grouped: dict[str, dict[str, list[WatchTarget]]] = {}
-    for watch in sorted(watches, key=lambda item: (item.repository.lower(), item.branch, item.channel_id)):
+    for watch in sorted(watches, key=lambda item: (item.repository.lower(), item.branch, item.user, item.channel_id)):
         grouped.setdefault(watch.repository, {}).setdefault(watch.branch, []).append(watch)
 
     heading = "브랜치 기준 감시 현황"
     if repository:
         heading = f"{repository} 브랜치 감시 현황"
 
-    lines = [f"{heading} {len(watches)}개"]
+    lines = [
+        f"{heading} {len(watches)}개",
+        f"브랜치 : {branch}",
+        f"감지 사용자 : {format_watch_user(user)}",
+    ]
     for repo_name, branches in grouped.items():
         lines.append(repo_name)
         for branch_name, branch_watches in branches.items():
-            channels = ", ".join(
-                f"<#{branch_watch.channel_id}> [{branch_watch.source}]"
-                for branch_watch in branch_watches
+            lines.append(f"- {branch_name}")
+            for branch_watch in branch_watches:
+                lines.append(
+                    f"  감지 사용자 : {format_watch_user(branch_watch.user)} -> <#{branch_watch.channel_id}> [{branch_watch.source}]"
+                )
+    return "\n".join(lines)
+
+
+def build_repository_branch_catalog_text(
+    repository: str,
+    branches: tuple[BranchInfo, ...],
+    watches: list[WatchTarget],
+    branch: str = "*",
+    user: str = "*",
+) -> str:
+    if not branches:
+        return f"{repository} 저장소에서 브랜치를 찾지 못했습니다."
+
+    lines = [
+        f"{repository} 브랜치 목록 {len(branches)}개",
+        f"브랜치 : {branch}",
+        f"감지 사용자 : {format_watch_user(user)}",
+    ]
+    watches_by_branch: dict[str, list[WatchTarget]] = {}
+    for watch in sorted(watches, key=lambda item: (item.branch, item.user, item.channel_id)):
+        watches_by_branch.setdefault(watch.branch.lower(), []).append(watch)
+
+    for branch_info in branches:
+        suffix = " [보호]" if branch_info.protected else ""
+        lines.append(f"- {branch_info.name}{suffix}")
+        branch_watches = watches_by_branch.get(branch_info.name.lower(), [])
+        if not branch_watches:
+            lines.append("  감시 없음")
+            continue
+        for watch in branch_watches:
+            lines.append(
+                f"  감지 사용자 : {format_watch_user(watch.user)} -> <#{watch.channel_id}> [{watch.source}]"
             )
-            lines.append(f"- {branch_name}: {channels}")
     return "\n".join(lines)
 
 
@@ -201,7 +274,10 @@ def build_watch_added_text(watch: WatchTarget, latest_sha: str) -> str:
     return "\n".join(
         [
             "감시를 추가했습니다.",
-            f"{watch.repository} @ {watch.branch} -> <#{watch.channel_id}>",
+            f"레포지토리 : {watch.repository}",
+            f"브랜치 : {watch.branch}",
+            f"감지 사용자 : {format_watch_user(watch.user)}",
+            f"채널 : <#{watch.channel_id}>",
             f"기준 SHA: {short_sha(latest_sha)}",
         ]
     )
@@ -211,7 +287,10 @@ def build_watch_removed_text(watch: WatchTarget) -> str:
     return "\n".join(
         [
             "감시를 제거했습니다.",
-            f"{watch.repository} @ {watch.branch} -> <#{watch.channel_id}>",
+            f"레포지토리 : {watch.repository}",
+            f"브랜치 : {watch.branch}",
+            f"감지 사용자 : {format_watch_user(watch.user)}",
+            f"채널 : <#{watch.channel_id}>",
         ]
     )
 

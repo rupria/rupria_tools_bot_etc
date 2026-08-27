@@ -17,6 +17,7 @@ class WatchTarget:
     branch: str
     channel_id: str
     source: str = "saved"
+    user: str = "*"
 
     def normalized(self) -> "WatchTarget":
         return WatchTarget(
@@ -24,6 +25,7 @@ class WatchTarget:
             branch=normalize_branch(self.branch),
             channel_id=normalize_channel_id(self.channel_id),
             source=self.source,
+            user=normalize_user(self.user),
         )
 
     def with_source(self, source: str) -> "WatchTarget":
@@ -68,6 +70,15 @@ def normalize_branch(value: str) -> str:
     return branch
 
 
+def normalize_user(value: str) -> str:
+    user = value.strip()
+    if not user:
+        raise ValueError("사용자 이름이 비어 있습니다.")
+    if user == "*":
+        return user
+    return user.removeprefix("@").strip().lower()
+
+
 def normalize_channel_id(value: str) -> str:
     channel_id = value.strip()
     if not re.fullmatch(r"\d{17,20}", channel_id):
@@ -81,7 +92,7 @@ def normalize_watch(watch: WatchTarget) -> WatchTarget:
 
 def create_watch_key(watch: WatchTarget) -> str:
     normalized = normalize_watch(watch)
-    return f"{normalized.repository.lower()}::{normalized.branch}::{normalized.channel_id}"
+    return f"{normalized.repository.lower()}::{normalized.branch}::{normalized.user}::{normalized.channel_id}"
 
 
 def dedupe_watches(watches: list[WatchTarget]) -> list[WatchTarget]:
@@ -101,9 +112,10 @@ def parse_watch_targets(value: str) -> tuple[WatchTarget, ...]:
         if not stripped:
             continue
         parts = [part.strip() for part in stripped.split("|")]
-        if len(parts) != 3:
+        if len(parts) not in {3, 4}:
             raise ValueError(f"WATCH_TARGETS 항목 형식이 잘못되었습니다: {item}")
-        watches.append(WatchTarget(parts[0], parts[1], parts[2], source="env").normalized())
+        user = parts[3] if len(parts) == 4 else "*"
+        watches.append(WatchTarget(parts[0], parts[1], parts[2], source="env", user=user).normalized())
     return tuple(watches)
 
 

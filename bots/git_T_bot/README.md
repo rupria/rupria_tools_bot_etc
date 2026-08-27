@@ -6,6 +6,7 @@
 
 - 저장소별 구분
 - 브랜치별 구분
+- 사용자별 감지 필터
 - 채널별 알림 분리
 - 재시작 후에도 감시 대상 유지
 - `main`, `dev`, `release` 같은 브랜치를 각각 따로 감시
@@ -16,17 +17,26 @@
 
 ```text
 !watch list
+!watch list owner/repo *
 !watch branches
 !watch branches owner/repo
+!watch branches owner/repo main rupria
 !watch add owner/repo main
-!watch add owner/repo dev #alerts
+!watch add owner/repo dev rupria #alerts
 !watch remove owner/repo main
 !watch check
 !watch test
+/github_watches repository:* branch:* user:*
+/github_branches repository:owner/repo branch:* user:*
+/github_watch_add repository:owner/repo branch:main user:* channel:#alerts
+/github_watch_remove repository:owner/repo branch:main user:* channel:#alerts
 ```
 
+- `*`는 전체를 뜻한다.
 - 채널을 따로 적지 않으면 현재 채널에 연결한다.
+- 사용자를 따로 적지 않으면 `*`로 저장되어 모든 작성자를 감지한다.
 - `!watch branches`는 저장소와 브랜치별로 묶어서 현재 감시 현황을 보여준다.
+- `!watch branches owner/repo`와 `/github_branches`는 실제 GitHub 브랜치 목록과 현재 연결된 감시 상태를 함께 보여준다.
 - `DISCORD_ALLOWED_ROLE_IDS`를 넣으면 해당 역할만 명령을 쓸 수 있다.
 - `DISCORD_ADMIN_CHANNEL_ID`를 넣으면 그 채널에서만 명령을 받는다.
 
@@ -38,7 +48,7 @@
 - `DISCORD_ALLOWED_ROLE_IDS`: 쉼표로 구분한 관리 역할 ID
 - `GITHUB_TOKEN`: GitHub API 토큰. private 저장소나 잦은 polling이면 권장
 - `WATCH_POLL_INTERVAL_MS`: 감시 주기
-- `WATCH_TARGETS`: 시작할 때 미리 붙일 감시 목록. `owner/repo|branch|channel_id` 형식
+- `WATCH_TARGETS`: 시작할 때 미리 붙일 감시 목록. `owner/repo|branch|channel_id` 또는 `owner/repo|branch|channel_id|user` 형식
 - `COMMAND_PREFIX`: 기본값 `!`이고 실제 명령은 `!watch ...`
 - `STARTUP_NOTIFY`: 시작 시 관리 채널에 상태 알림 전송 여부
 

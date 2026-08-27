@@ -40,6 +40,7 @@ def save_persisted_watches(file_path: Path, watches: list[WatchTarget]) -> None:
                     "branch": watch.branch,
                     "channel_id": watch.channel_id,
                     "source": watch.source,
+                    "user": watch.user,
                 }
                 for watch in watches
             ],

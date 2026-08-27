@@ -39,6 +39,12 @@ class ChangedFileInfo:
     status: str
 
 
+@dataclass(frozen=True)
+class BranchInfo:
+    name: str
+    protected: bool
+
+
 class GitHubApiError(RuntimeError):
     pass
 
@@ -47,7 +53,7 @@ class GitHubClient:
     def __init__(self, token: str) -> None:
         self.token = token
 
-    async def _request(self, session: aiohttp.ClientSession, endpoint: str) -> dict:
+    async def _request(self, session: aiohttp.ClientSession, endpoint: str) -> object:
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "git_T_bot/1.0",
@@ -72,6 +78,8 @@ class GitHubClient:
             session,
             f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{quote(branch, safe='')}",
         )
+        if not isinstance(data, dict):
+            raise GitHubApiError("GitHub 커밋 응답 형식이 예상과 다릅니다.")
         return CommitInfo(
             sha=str(data["sha"]),
             html_url=str(data["html_url"]),
@@ -96,6 +104,8 @@ class GitHubClient:
             session,
             f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/compare/{quote(previous_sha, safe='')}...{quote(latest_sha, safe='')}",
         )
+        if not isinstance(data, dict):
+            raise GitHubApiError("GitHub 비교 응답 형식이 예상과 다릅니다.")
         return CompareInfo(
             html_url=str(data.get("html_url", "")),
             total_commits=int(data.get("total_commits", 0)),
@@ -122,6 +132,33 @@ class GitHubClient:
                 for changed_file in data.get("files", [])
             ),
         )
+
+    async def list_branches(
+        self,
+        session: aiohttp.ClientSession,
+        repository: str,
+    ) -> tuple[BranchInfo, ...]:
+        owner, repo = repository.split("/", 1)
+        data = await self._request(
+            session,
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/branches?per_page=100",
+        )
+        if not isinstance(data, list):
+            raise GitHubApiError("GitHub 브랜치 응답 형식이 예상과 다릅니다.")
+        branches: list[BranchInfo] = []
+        for branch in data:
+            if not isinstance(branch, dict):
+                continue
+            name = str(branch.get("name", "")).strip()
+            if not name:
+                continue
+            branches.append(
+                BranchInfo(
+                    name=name,
+                    protected=bool(branch.get("protected", False)),
+                )
+            )
+        return tuple(branches)
 
     def make_demo_commit(self) -> CommitInfo:
         return CommitInfo(
