@@ -36,7 +36,7 @@
 - `GITHUB_TOKEN`: GitHub API 토큰. private 저장소나 잦은 polling이면 권장
 - `WATCH_POLL_INTERVAL_MS`: 감시 주기
 - `WATCH_TARGETS`: 시작할 때 미리 붙일 감시 목록. `owner/repo|branch|channel_id` 형식
-- `COMMAND_PREFIX`: 기본값 `!watch`
+- `COMMAND_PREFIX`: 기본값 `!`이고 실제 명령은 `!watch ...`
 - `STARTUP_NOTIFY`: 시작 시 관리 채널에 상태 알림 전송 여부
 
 ## 로컬 실행
@@ -44,22 +44,22 @@
 ```powershell
 Copy-Item .env.example .env
 notepad .env
-npm install
-npm start
+python -m pip install discord.py aiohttp python-dotenv
+python main.py
 ```
 
 ## Dishost 배포
 
-2026년 8월 27일 기준 Dishost 문서는 GitHub 자동 배포와 모노레포 하위 디렉터리 `workdir`를 지원한다. 이 저장소에서는 `bots/git_T_bot` 폴더를 서비스 작업 디렉터리로 잡으면 된다.
+2026년 8월 27일 기준, 현재 연결된 Dishost 서비스 화면에서는 Python 이미지를 사용하고 `GIT_ADDRESS`, `BRANCH`, `STARTUP_FILE`, `PY_PACKAGES`를 시작 설정에서 받는다. 그래서 이 봇도 Python 기준으로 맞춰두었다.
 
 권장 순서:
 
 1. Dishost 서비스에서 GitHub 저장소 `rupria/rupria_tools_bot_etc` 연결
 2. 브랜치 `main` 선택
-3. 작업 디렉터리를 `bots/git_T_bot`으로 설정
-4. 환경 변수 입력
-5. 자동 재배포 활성화
-6. 시작 명령은 `npm start`
+3. 시작 파일을 `bots/git_T_bot/main.py`로 설정
+4. Python 패키지에 `discord.py aiohttp python-dotenv` 입력
+5. 환경 변수 입력
+6. Push 시 자동 배포 활성화
 
 ## 완료 알림 기준
 

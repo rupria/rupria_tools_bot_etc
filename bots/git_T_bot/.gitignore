@@ -1,4 +1,6 @@
 .env
 node_modules/
 data/*.json
-logs/
+.testdeps/
+__pycache__/
+*.pyc

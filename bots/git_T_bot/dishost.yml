@@ -1,6 +1,6 @@
 name: git_T_bot
-language: javascript
-startup: npm start
+language: python
+startup: python main.py
 memory: 256
 cpu: 25
 disk: 512
@@ -12,8 +12,9 @@ env:
   GITHUB_TOKEN: ""
   WATCH_POLL_INTERVAL_MS: "60000"
   WATCH_TARGETS: "rupria/rupria_tools_bot_etc|main|YOUR_CHANNEL_ID"
-  COMMAND_PREFIX: "!watch"
+  COMMAND_PREFIX: "!"
   STARTUP_NOTIFY: "true"
+  PY_PACKAGES: "discord.py aiohttp python-dotenv"
 git:
   autoDeploy: true
   branch: main

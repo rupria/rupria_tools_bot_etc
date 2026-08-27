@@ -7,7 +7,7 @@
 - `bots/git_T_bot`
   - GitHub 브랜치 감시 Discord 봇
   - GitHub 기본 브랜치: `main`
-  - DisHost 작업 디렉터리: `bots/git_T_bot`
+  - DisHost 시작 파일: `bots/git_T_bot/main.py`
 
 ## DisHost 메모
 

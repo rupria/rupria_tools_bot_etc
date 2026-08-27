@@ -1,7 +1,6 @@
 name: git_T_bot
-language: javascript
-workdir: bots/git_T_bot
-startup: npm start
+language: python
+startup: python bots/git_T_bot/main.py
 memory: 256
 cpu: 25
 disk: 512
