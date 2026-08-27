@@ -51,7 +51,21 @@ intents.guilds = True
 intents.messages = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix=settings.command_prefix, intents=intents, help_command=None)
+
+async def close_http_session() -> None:
+    global http_session
+    if http_session is not None and not http_session.closed:
+        await http_session.close()
+    http_session = None
+
+
+class GitTBot(commands.Bot):
+    async def close(self) -> None:
+        await close_http_session()
+        await super().close()
+
+
+bot = GitTBot(command_prefix=settings.command_prefix, intents=intents, help_command=None)
 github = GitHubClient(settings.github_token)
 saved_watches = load_persisted_watches(settings.watch_file)
 runtime_state = load_runtime_state(settings.state_file)
