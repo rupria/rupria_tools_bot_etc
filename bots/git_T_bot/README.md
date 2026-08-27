@@ -48,7 +48,7 @@
 - `DISCORD_ADMIN_CHANNEL_ID`: 관리 명령을 받을 채널 ID
 - `DISCORD_ALLOWED_ROLE_IDS`: 쉼표로 구분한 관리 역할 ID
 - `GITHUB_TOKEN`: GitHub API 토큰. private 저장소나 잦은 polling이면 권장
-- `WATCH_POLL_INTERVAL_MS`: 감시 주기
+- `WATCH_POLL_INTERVAL_MS`: 감시 주기. 기본값 `20000`(20초)
 - `WATCH_TARGETS`: 시작할 때 미리 붙일 감시 목록. `owner/repo|branch|channel_id` 또는 `owner/repo|branch|channel_id|user` 형식
 - `COMMAND_PREFIX`: 기본값 `!`이고 실제 명령은 `!watch ...`
 - `STARTUP_NOTIFY`: 시작 시 관리 채널에 상태 알림 전송 여부

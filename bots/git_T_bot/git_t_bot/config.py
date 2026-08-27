@@ -139,7 +139,7 @@ def load_settings(project_root: Path) -> Settings:
     if admin_channel_id:
         normalize_channel_id(admin_channel_id)
 
-    poll_interval_ms = int(os.getenv("WATCH_POLL_INTERVAL_MS", "60000"))
+    poll_interval_ms = int(os.getenv("WATCH_POLL_INTERVAL_MS", "20000"))
     if poll_interval_ms < 10000:
         raise RuntimeError("WATCH_POLL_INTERVAL_MS는 10000 이상이어야 합니다.")
 
