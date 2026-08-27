@@ -114,7 +114,10 @@ def parse_bool(value: str, default: bool) -> bool:
 
 
 def load_settings(project_root: Path) -> Settings:
-    load_dotenv(project_root / ".env")
+    for directory in (project_root, *project_root.parents):
+        env_path = directory / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
 
     bot_token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
     if not bot_token:
