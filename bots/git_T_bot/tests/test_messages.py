@@ -11,6 +11,7 @@ from git_t_bot.messages import (
     build_list_text,
     build_poll_summary_text,
     build_repository_branch_catalog_text,
+    build_startup_text,
     build_watch_added_text,
     short_sha,
 )
@@ -98,6 +99,13 @@ class MessageTests(unittest.TestCase):
         text = build_help_text("!")
         self.assertIn("!watch branches owner/repo [branch] [user]", text)
         self.assertIn("/github_branches repository:owner/repo branch:* user:*", text)
+
+    def test_build_startup_text(self) -> None:
+        text = build_startup_text(
+            [WatchTarget("rupria/rupria_tools_bot_etc", "main", "12345678901234567")],
+            120000,
+        )
+        self.assertEqual(text, "git_T_bot 실행됨")
 
     def test_build_poll_summary_text(self) -> None:
         text = build_poll_summary_text(

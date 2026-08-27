@@ -261,13 +261,7 @@ def build_repository_branch_catalog_text(
 
 
 def build_startup_text(watches: list[WatchTarget], poll_interval_ms: int) -> str:
-    return "\n".join(
-        [
-            "git_T_bot 실행됨",
-            f"감시 대상: {len(watches)}개",
-            f"주기: {round(poll_interval_ms / 1000)}초",
-        ]
-    )
+    return "git_T_bot 실행됨"
 
 
 def build_watch_added_text(watch: WatchTarget, latest_sha: str) -> str:
