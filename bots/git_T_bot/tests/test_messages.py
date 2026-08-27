@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 
 from git_t_bot.config import WatchTarget
+from git_t_bot.github_client import GitHubClient
 from git_t_bot.messages import (
+    build_commit_embed,
     build_branch_list_text,
     build_help_text,
     build_list_text,
@@ -40,6 +42,23 @@ class MessageTests(unittest.TestCase):
             "abcdef1234567890",
         )
         self.assertIn("abcdef1", text)
+
+    def test_build_commit_embed(self) -> None:
+        client = GitHubClient("")
+        watch = WatchTarget("rupria/data-collection-workspace", "main", "12345678901234567")
+        embed = build_commit_embed(
+            watch,
+            "1234567890abcdef1234567890abcdef12345678",
+            client.make_demo_commit(),
+            client.make_demo_compare(),
+        )
+        self.assertEqual(embed.title, "rupria/data-collection-workspace · main")
+        self.assertIn("감시 사용자: rupria", embed.description)
+        self.assertIn("변경 규모: 4개 파일 · 3개 커밋", embed.description)
+        self.assertEqual(embed.fields[0].name, "커밋 메시지 (3개)")
+        self.assertIn("81cc880", embed.fields[0].value)
+        self.assertEqual(embed.fields[2].name, "변경 파일 · 줄 수")
+        self.assertIn("data23_ML_분류분석.ipynb", embed.fields[2].value)
 
     def test_build_help_text(self) -> None:
         text = build_help_text("!")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 
 from .config import WatchTarget
-from .github_client import CommitInfo, CompareInfo
+from .github_client import ChangedFileInfo, CommitInfo, CompareCommitInfo, CompareInfo
 
 
 def short_sha(value: str) -> str:
@@ -20,31 +20,121 @@ def truncate(text: str, max_length: int) -> str:
     return f"{text[: max_length - 3]}..."
 
 
+def owner_name(repository: str) -> str:
+    return repository.split("/", 1)[0]
+
+
+def build_change_scale_text(compare_info: CompareInfo | None) -> str:
+    if compare_info is None:
+        return "변경 규모: 커밋 1개"
+
+    file_count = len(compare_info.files)
+    commit_count = compare_info.total_commits or len(compare_info.commits) or 1
+    if not compare_info.files:
+        return f"변경 규모: 커밋 {commit_count}개"
+
+    return f"변경 규모: {file_count}개 파일 · {commit_count}개 커밋"
+
+
+def build_commit_summary_lines(latest_commit: CommitInfo, compare_info: CompareInfo | None) -> list[str]:
+    commit_items: tuple[CompareCommitInfo, ...]
+    if compare_info and compare_info.commits:
+        commit_items = compare_info.commits
+    else:
+        commit_items = (
+            CompareCommitInfo(
+                sha=latest_commit.sha,
+                html_url=latest_commit.html_url,
+                message=latest_commit.message,
+                author_name=latest_commit.author_name,
+            ),
+        )
+
+    lines = [
+        f"[`{short_sha(commit.sha)}`]({commit.html_url or latest_commit.html_url}) {truncate(first_line(commit.message), 90)}"
+        for commit in commit_items[:4]
+    ]
+    remaining_count = len(commit_items) - len(lines)
+    if remaining_count > 0:
+        lines.append(f"... 외 {remaining_count}개 커밋")
+    return lines
+
+
+def build_author_summary(latest_commit: CommitInfo, compare_info: CompareInfo | None) -> str:
+    authors: list[str] = []
+    if compare_info and compare_info.commits:
+        for commit in compare_info.commits:
+            if commit.author_name not in authors:
+                authors.append(commit.author_name)
+    if not authors:
+        authors.append(latest_commit.author_name)
+    if len(authors) <= 3:
+        return "\n".join(authors)
+    return "\n".join([*authors[:3], f"... 외 {len(authors) - 3}명"])
+
+
+def format_changed_file_line(changed_file: ChangedFileInfo) -> str:
+    file_name = truncate(changed_file.filename, 72)
+    return f"`{file_name}` +{changed_file.additions} / -{changed_file.deletions}"
+
+
+def build_file_summary_lines(compare_info: CompareInfo | None) -> list[str]:
+    if not compare_info or not compare_info.files:
+        return ["비교 파일 정보가 아직 없습니다."]
+
+    lines = [format_changed_file_line(changed_file) for changed_file in compare_info.files[:5]]
+    remaining_count = len(compare_info.files) - len(lines)
+    if remaining_count > 0:
+        lines.append(f"... 외 {remaining_count}개 파일")
+    return lines
+
+
 def build_commit_embed(
     watch: WatchTarget,
     previous_sha: str,
     latest_commit: CommitInfo,
     compare_info: CompareInfo | None,
 ) -> discord.Embed:
-    summary = f"{compare_info.total_commits}개 커밋 반영" if compare_info and compare_info.total_commits else "새 커밋 반영"
     links = [f"[커밋 열기]({latest_commit.html_url})"]
     if compare_info and compare_info.html_url:
         links.append(f"[변경 보기]({compare_info.html_url})")
 
     embed = discord.Embed(
-        title="브랜치 업데이트 알림",
-        description=f"{truncate(first_line(latest_commit.message), 180)}\n{' | '.join(links)}",
+        title=f"{watch.repository} · {watch.branch}",
+        url=compare_info.html_url if compare_info and compare_info.html_url else latest_commit.html_url,
+        description="\n".join(
+            [
+                f"감시 사용자: {owner_name(watch.repository)}",
+                build_change_scale_text(compare_info),
+                " | ".join(links),
+            ]
+        ),
         color=discord.Color.red(),
     )
-    embed.add_field(name="저장소", value=watch.repository, inline=True)
-    embed.add_field(name="브랜치", value=watch.branch, inline=True)
-    embed.add_field(name="작성자", value=latest_commit.author_name, inline=True)
-    embed.add_field(name="이전 SHA", value=short_sha(previous_sha) if previous_sha else "-", inline=True)
-    embed.add_field(name="현재 SHA", value=short_sha(latest_commit.sha), inline=True)
-    embed.add_field(name="반영 수", value=summary, inline=True)
+    commit_count = compare_info.total_commits if compare_info and compare_info.total_commits else 1
+    embed.add_field(
+        name=f"커밋 메시지 ({commit_count}개)",
+        value="\n".join(build_commit_summary_lines(latest_commit, compare_info)),
+        inline=False,
+    )
+    embed.add_field(
+        name="커밋 작성자",
+        value=build_author_summary(latest_commit, compare_info),
+        inline=False,
+    )
+    embed.add_field(
+        name="변경 파일 · 줄 수",
+        value="\n".join(build_file_summary_lines(compare_info)),
+        inline=False,
+    )
+    embed.add_field(
+        name="비교 범위",
+        value=f"{short_sha(previous_sha) if previous_sha else '-'} -> {short_sha(latest_commit.sha)}",
+        inline=False,
+    )
     if latest_commit.committed_at:
         embed.timestamp = discord.utils.parse_time(latest_commit.committed_at)
-    embed.set_footer(text="GitHub 브랜치 HEAD 변경을 감지했습니다.")
+    embed.set_footer(text="중앙 GitHub 감시 봇. 대상 저장소 설치 불필요")
     return embed
 
 

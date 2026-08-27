@@ -19,6 +19,24 @@ class CommitInfo:
 class CompareInfo:
     html_url: str
     total_commits: int
+    commits: tuple["CompareCommitInfo", ...] = ()
+    files: tuple["ChangedFileInfo", ...] = ()
+
+
+@dataclass(frozen=True)
+class CompareCommitInfo:
+    sha: str
+    html_url: str
+    message: str
+    author_name: str
+
+
+@dataclass(frozen=True)
+class ChangedFileInfo:
+    filename: str
+    additions: int
+    deletions: int
+    status: str
 
 
 class GitHubApiError(RuntimeError):
@@ -81,6 +99,28 @@ class GitHubClient:
         return CompareInfo(
             html_url=str(data.get("html_url", "")),
             total_commits=int(data.get("total_commits", 0)),
+            commits=tuple(
+                CompareCommitInfo(
+                    sha=str(commit.get("sha", "")),
+                    html_url=str(commit.get("html_url", "")),
+                    message=str(commit.get("commit", {}).get("message", "")),
+                    author_name=str(
+                        commit.get("author", {}).get("login")
+                        or commit.get("commit", {}).get("author", {}).get("name")
+                        or "unknown"
+                    ),
+                )
+                for commit in data.get("commits", [])
+            ),
+            files=tuple(
+                ChangedFileInfo(
+                    filename=str(changed_file.get("filename", "")),
+                    additions=int(changed_file.get("additions", 0)),
+                    deletions=int(changed_file.get("deletions", 0)),
+                    status=str(changed_file.get("status", "")),
+                )
+                for changed_file in data.get("files", [])
+            ),
         )
 
     def make_demo_commit(self) -> CommitInfo:
@@ -96,4 +136,50 @@ class GitHubClient:
         return CompareInfo(
             html_url="https://github.com/rupria/rupria_tools_bot_etc/compare/old...new",
             total_commits=3,
+            commits=(
+                CompareCommitInfo(
+                    sha="81cc8801234567890abcdef1234567890abcdef",
+                    html_url="https://github.com/rupria/rupria_tools_bot_etc/commit/81cc8801234567890abcdef1234567890abcdef",
+                    message="26.08.05 수업내용 업데이트",
+                    author_name="rupria",
+                ),
+                CompareCommitInfo(
+                    sha="7265aa21234567890abcdef1234567890abcdef",
+                    html_url="https://github.com/rupria/rupria_tools_bot_etc/commit/7265aa21234567890abcdef1234567890abcdef",
+                    message="회귀 분석 결과 정리",
+                    author_name="rupria",
+                ),
+                CompareCommitInfo(
+                    sha="44beef91234567890abcdef1234567890abcdef",
+                    html_url="https://github.com/rupria/rupria_tools_bot_etc/commit/44beef91234567890abcdef1234567890abcdef",
+                    message="Python 구현 노트 정리",
+                    author_name="rupria",
+                ),
+            ),
+            files=(
+                ChangedFileInfo(
+                    filename="data23_ML_분류분석.ipynb",
+                    additions=56,
+                    deletions=1,
+                    status="modified",
+                ),
+                ChangedFileInfo(
+                    filename="data23_ML_회귀분석_성능평가(metric).ipynb",
+                    additions=383,
+                    deletions=0,
+                    status="modified",
+                ),
+                ChangedFileInfo(
+                    filename="data24_ML_정사하강법_회귀평가자료.ipynb",
+                    additions=157,
+                    deletions=0,
+                    status="modified",
+                ),
+                ChangedFileInfo(
+                    filename="data25_ML_회귀_python구현.ipynb",
+                    additions=887,
+                    deletions=0,
+                    status="modified",
+                ),
+            ),
         )
