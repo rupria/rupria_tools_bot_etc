@@ -383,14 +383,13 @@ async def poll_watches() -> dict[str, int | bool]:
 
 async def sync_application_commands() -> None:
     try:
+        global_synced = await bot.tree.sync()
+        logger.info("Synced %s global app commands", len(global_synced))
         if settings.guild_id:
             guild = discord.Object(id=int(settings.guild_id))
             bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            logger.info("Synced %s guild app commands", len(synced))
-            return
-        synced = await bot.tree.sync()
-        logger.info("Synced %s global app commands", len(synced))
+            guild_synced = await bot.tree.sync(guild=guild)
+            logger.info("Synced %s guild app commands", len(guild_synced))
     except Exception:
         logger.exception("failed to sync application commands")
 
@@ -685,14 +684,14 @@ async def github_branches_command(
     await reply_interaction(interaction, text)
 
 
-@bot.tree.command(name="github_watch_add", description="GitHub 감시 대상을 추가합니다.")
+@bot.tree.command(name="github_watch", description="GitHub 저장소의 push 알림을 현재 채널에 등록합니다.")
 @app_commands.describe(
     repository="owner/repo 형식",
     branch="실제 감시할 브랜치명",
     user="GitHub 사용자명 또는 *",
     channel="비워두면 현재 채널을 사용합니다.",
 )
-async def github_watch_add_command(
+async def github_watch_command(
     interaction: discord.Interaction,
     repository: str,
     branch: str,
@@ -752,14 +751,14 @@ async def github_watch_add_command(
     await reply_interaction(interaction, build_watch_added_text(watch, latest_sha))
 
 
-@bot.tree.command(name="github_watch_remove", description="GitHub 감시 대상을 제거합니다.")
+@bot.tree.command(name="github_unwatch", description="현재 채널에서 GitHub 저장소 감시를 해제합니다.")
 @app_commands.describe(
     repository="owner/repo 형식",
     branch="제거할 브랜치명",
     user="GitHub 사용자명 또는 *",
     channel="비워두면 현재 채널을 사용합니다.",
 )
-async def github_watch_remove_command(
+async def github_unwatch_command(
     interaction: discord.Interaction,
     repository: str,
     branch: str,

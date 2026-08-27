@@ -151,8 +151,8 @@ def build_help_text(prefix: str) -> str:
             f"{prefix}watch test [#channel]",
             "/github_watches repository:* branch:* user:*",
             "/github_branches repository:owner/repo branch:* user:*",
-            "/github_watch_add repository:owner/repo branch:main user:* channel:#alerts",
-            "/github_watch_remove repository:owner/repo branch:main user:* channel:#alerts",
+            "/github_watch repository:owner/repo branch:main user:* channel:#alerts",
+            "/github_unwatch repository:owner/repo branch:main user:* channel:#alerts",
         ]
     )
 
