@@ -7,9 +7,10 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
-from git_t_bot.config import WatchTarget, create_watch_key, dedupe_watches, load_settings
+from git_t_bot.config import WatchTarget, create_watch_key, dedupe_watches, load_settings, normalize_repository
 from git_t_bot.github_client import GitHubClient
 from git_t_bot.messages import (
+    build_branch_list_text,
     build_commit_embed,
     build_help_text,
     build_list_text,
@@ -232,6 +233,32 @@ async def watch_list(ctx: commands.Context[commands.Bot]) -> None:
         await reply(ctx, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
         return
     await reply(ctx, build_list_text(get_all_watches()))
+
+
+@watch_group.command(name="branches")
+async def watch_branches(
+    ctx: commands.Context[commands.Bot],
+    repository: str | None = None,
+) -> None:
+    if not is_authorized(ctx):
+        await reply(ctx, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
+        return
+
+    watches = get_all_watches()
+    normalized_repository = None
+    if repository:
+        try:
+            normalized_repository = normalize_repository(repository)
+        except ValueError as error:
+            await reply(ctx, str(error))
+            return
+        watches = [
+            watch
+            for watch in watches
+            if watch.repository.lower() == normalized_repository.lower()
+        ]
+
+    await reply(ctx, build_branch_list_text(watches, normalized_repository))
 
 
 @watch_group.command(name="check")

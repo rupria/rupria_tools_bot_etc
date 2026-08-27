@@ -16,6 +16,8 @@
 
 ```text
 !watch list
+!watch branches
+!watch branches owner/repo
 !watch add owner/repo main
 !watch add owner/repo dev #alerts
 !watch remove owner/repo main
@@ -24,6 +26,7 @@
 ```
 
 - 채널을 따로 적지 않으면 현재 채널에 연결한다.
+- `!watch branches`는 저장소와 브랜치별로 묶어서 현재 감시 현황을 보여준다.
 - `DISCORD_ALLOWED_ROLE_IDS`를 넣으면 해당 역할만 명령을 쓸 수 있다.
 - `DISCORD_ADMIN_CHANNEL_ID`를 넣으면 그 채널에서만 명령을 받는다.
 

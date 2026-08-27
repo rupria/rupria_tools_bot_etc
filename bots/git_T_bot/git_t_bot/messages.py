@@ -53,6 +53,7 @@ def build_help_text(prefix: str) -> str:
         [
             "사용 가능한 명령",
             f"{prefix}watch list",
+            f"{prefix}watch branches [owner/repo]",
             f"{prefix}watch add owner/repo branch [#channel]",
             f"{prefix}watch remove owner/repo branch [#channel]",
             f"{prefix}watch check",
@@ -67,6 +68,32 @@ def build_list_text(watches: list[WatchTarget]) -> str:
     lines = [f"현재 감시 대상 {len(watches)}개"]
     for index, watch in enumerate(watches, start=1):
         lines.append(f"{index}. {watch.repository} @ {watch.branch} -> <#{watch.channel_id}> [{watch.source}]")
+    return "\n".join(lines)
+
+
+def build_branch_list_text(watches: list[WatchTarget], repository: str | None = None) -> str:
+    if not watches:
+        if repository:
+            return f"감시 중인 저장소를 찾지 못했습니다.\n{repository}"
+        return "현재 등록된 감시 대상이 없습니다."
+
+    grouped: dict[str, dict[str, list[WatchTarget]]] = {}
+    for watch in sorted(watches, key=lambda item: (item.repository.lower(), item.branch, item.channel_id)):
+        grouped.setdefault(watch.repository, {}).setdefault(watch.branch, []).append(watch)
+
+    heading = "브랜치 기준 감시 현황"
+    if repository:
+        heading = f"{repository} 브랜치 감시 현황"
+
+    lines = [f"{heading} {len(watches)}개"]
+    for repo_name, branches in grouped.items():
+        lines.append(repo_name)
+        for branch_name, branch_watches in branches.items():
+            channels = ", ".join(
+                f"<#{branch_watch.channel_id}> [{branch_watch.source}]"
+                for branch_watch in branch_watches
+            )
+            lines.append(f"- {branch_name}: {channels}")
     return "\n".join(lines)
 
 
