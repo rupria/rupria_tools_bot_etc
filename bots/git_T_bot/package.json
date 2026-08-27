@@ -1,16 +1,17 @@
 {
-  "name": "codex-discord-bridge",
+  "name": "git_t_bot",
   "version": "0.1.0",
   "private": true,
-  "description": "Private Discord bridge for Codex sessions",
+  "description": "Discord bot that watches GitHub branches and posts completion alerts",
   "scripts": {
-    "start": "node ./scripts/start-bridge.mjs",
-    "test": "python ./tests/test_completion_alert.py && python ./tests/test_configure_bridge.py",
-    "bridge:install": "powershell -ExecutionPolicy Bypass -File scripts/install-bridge.ps1",
-    "bridge:configure": "powershell -ExecutionPolicy Bypass -File scripts/configure-bridge.ps1",
-    "bridge:start": "powershell -ExecutionPolicy Bypass -File scripts/start-bridge.ps1"
+    "start": "node ./index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "codex-discord-connector": "0.1.0"
+    "discord.js": "^14.22.1",
+    "dotenv": "^17.2.1"
   }
 }
