@@ -80,12 +80,17 @@ async def send_admin_notice(content: str) -> None:
         if channel is None:
             channel = await bot.fetch_channel(int(settings.admin_channel_id))
     except Exception:
-        logger.warning(content)
+        logger.warning("failed to resolve admin channel %s", settings.admin_channel_id)
         return
     if isinstance(channel, (discord.TextChannel, discord.Thread)):
-        await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
-    else:
-        logger.warning(content)
+        try:
+            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+            return
+        except Exception:
+            logger.warning("failed to send admin notice to %s", settings.admin_channel_id)
+            logger.warning(content)
+            return
+    logger.warning(content)
 
 
 def set_head_state(watch: WatchTarget, latest_sha: str) -> None:
