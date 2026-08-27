@@ -1,0 +1,16 @@
+{
+  "name": "codex-discord-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private Discord bridge for Codex sessions",
+  "scripts": {
+    "start": "node ./scripts/start-bridge.mjs",
+    "test": "python ./tests/test_completion_alert.py && python ./tests/test_configure_bridge.py",
+    "bridge:install": "powershell -ExecutionPolicy Bypass -File scripts/install-bridge.ps1",
+    "bridge:configure": "powershell -ExecutionPolicy Bypass -File scripts/configure-bridge.ps1",
+    "bridge:start": "powershell -ExecutionPolicy Bypass -File scripts/start-bridge.ps1"
+  },
+  "dependencies": {
+    "codex-discord-connector": "0.1.0"
+  }
+}

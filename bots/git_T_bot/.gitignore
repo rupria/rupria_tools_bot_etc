@@ -1,0 +1,10 @@
+# Discord bot credentials and generated connector state
+.env
+.connect/
+
+# Local dependency installation
+node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
