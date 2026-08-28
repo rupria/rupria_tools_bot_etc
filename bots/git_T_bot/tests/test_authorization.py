@@ -33,8 +33,14 @@ class DummyMember:
 
 
 class DummyGuild:
-    def __init__(self, guild_id: int) -> None:
+    def __init__(self, guild_id: int, visible_channel_ids: tuple[int, ...] = ()) -> None:
         self.id = guild_id
+        self._visible_channel_ids = set(visible_channel_ids)
+
+    def get_channel_or_thread(self, channel_id: int):
+        if channel_id in self._visible_channel_ids:
+            return DummyChannel(channel_id)
+        return None
 
 
 class DummyChannel:
@@ -88,6 +94,21 @@ class AuthorizationTests(unittest.TestCase):
     def test_non_admin_can_use_allowed_channel_with_allowed_role(self) -> None:
         interaction = DummyInteraction(guild_id=1, channel_id=2, member=DummyMember(role_ids=(9,)))
         self.assertTrue(bot_main.is_interaction_authorized(interaction))
+
+    def test_get_visible_watches_only_returns_watches_for_current_guild_channels(self) -> None:
+        original_saved_watches = bot_main.saved_watches
+        try:
+            bot_main.saved_watches = [
+                bot_main.WatchTarget("rupria/gitproject", "main", "10111111111111111", user="*"),
+                bot_main.WatchTarget("rupria/gitproject", "test", "20222222222222222", user="rupria"),
+            ]
+            guild = DummyGuild(1, visible_channel_ids=(10111111111111111,))
+            visible = bot_main.get_visible_watches(guild)
+            self.assertEqual(len(visible), 1)
+            self.assertEqual(visible[0].channel_id, "10111111111111111")
+            self.assertEqual(visible[0].branch, "main")
+        finally:
+            bot_main.saved_watches = original_saved_watches
 
 
 if __name__ == "__main__":

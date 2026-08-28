@@ -81,6 +81,20 @@ def get_all_watches() -> list[WatchTarget]:
     return dedupe_watches([*env_watches, *file_watches])
 
 
+def watch_belongs_to_guild(watch: WatchTarget, guild: discord.Guild | None) -> bool:
+    if guild is None:
+        return False
+    try:
+        channel = guild.get_channel_or_thread(int(watch.channel_id))
+    except (TypeError, ValueError):
+        return False
+    return channel is not None
+
+
+def get_visible_watches(guild: discord.Guild | None) -> list[WatchTarget]:
+    return [watch for watch in get_all_watches() if watch_belongs_to_guild(watch, guild)]
+
+
 def is_discord_administrator(member: object) -> bool:
     permissions = getattr(member, "guild_permissions", None)
     return bool(getattr(permissions, "administrator", False))
@@ -264,6 +278,7 @@ async def build_repository_branch_catalog(
     repository: str,
     branch_filters: tuple[str, ...] = ("*",),
     user_filters: tuple[str, ...] = ("*",),
+    visible_watches: list[WatchTarget] | None = None,
 ) -> str:
     session = await get_session()
     branches = await github.list_branches(session, repository)
@@ -273,7 +288,7 @@ async def build_repository_branch_catalog(
         for branch_info in sorted(branches, key=lambda item: item.name.lower())
         if branch_names is None or branch_info.name.lower() in branch_names
     )
-    matching_watches = filter_watches(get_all_watches(), (repository,), branch_filters, user_filters)
+    matching_watches = filter_watches(visible_watches or get_all_watches(), (repository,), branch_filters, user_filters)
     if not filtered_branches:
         return "\n".join(
             [
@@ -296,10 +311,11 @@ async def build_repository_branch_catalogs(
     repositories: tuple[str, ...],
     branch_filters: tuple[str, ...],
     user_filters: tuple[str, ...],
+    visible_watches: list[WatchTarget] | None = None,
 ) -> str:
     return "\n\n".join(
         [
-            await build_repository_branch_catalog(repository, branch_filters, user_filters)
+            await build_repository_branch_catalog(repository, branch_filters, user_filters, visible_watches)
             for repository in repositories
         ]
     )
@@ -509,7 +525,7 @@ async def watch_list(
         await reply(ctx, str(error))
         return
 
-    watches = filter_watches(get_all_watches(), normalized_repositories, normalized_branches, normalized_users)
+    watches = filter_watches(get_visible_watches(ctx.guild), normalized_repositories, normalized_branches, normalized_users)
     await reply(ctx, build_list_text(watches, normalized_repositories, normalized_branches, normalized_users))
 
 
@@ -531,14 +547,20 @@ async def watch_branches(
         await reply(ctx, str(error))
         return
 
+    visible_watches = get_visible_watches(ctx.guild)
     if not repository or repository.strip() == "*":
-        watches = filter_watches(get_all_watches(), ("*",), normalized_branches, normalized_users)
+        watches = filter_watches(visible_watches, ("*",), normalized_branches, normalized_users)
         await reply(ctx, build_branch_list_text(watches, None, normalized_branches, normalized_users))
         return
 
     try:
         normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
-        text = await build_repository_branch_catalogs(normalized_repositories, normalized_branches, normalized_users)
+        text = await build_repository_branch_catalogs(
+            normalized_repositories,
+            normalized_branches,
+            normalized_users,
+            visible_watches,
+        )
     except Exception as error:
         await reply(ctx, str(error))
         return
@@ -690,7 +712,12 @@ async def github_watches_command(
         await reply_interaction(interaction, str(error))
         return
 
-    watches = filter_watches(get_all_watches(), normalized_repositories, normalized_branches, normalized_users)
+    watches = filter_watches(
+        get_visible_watches(interaction.guild),
+        normalized_repositories,
+        normalized_branches,
+        normalized_users,
+    )
     await reply_interaction(
         interaction,
         build_list_text(watches, normalized_repositories, normalized_branches, normalized_users),
@@ -723,7 +750,12 @@ async def github_branches_command(
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        text = await build_repository_branch_catalogs(normalized_repositories, normalized_branches, normalized_users)
+        text = await build_repository_branch_catalogs(
+            normalized_repositories,
+            normalized_branches,
+            normalized_users,
+            get_visible_watches(interaction.guild),
+        )
     except Exception as error:
         await reply_interaction(interaction, str(error))
         return
