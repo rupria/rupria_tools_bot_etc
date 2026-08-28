@@ -6,6 +6,8 @@ from git_t_bot.config import WatchTarget
 from git_t_bot.github_client import BranchInfo, GitHubClient
 from git_t_bot.messages import (
     build_branch_list_text,
+    build_watch_batch_added_text,
+    build_watch_batch_removed_text,
     build_commit_embed,
     build_help_text,
     build_list_text,
@@ -32,6 +34,17 @@ class MessageTests(unittest.TestCase):
         self.assertIn("브랜치 : main", text)
         self.assertIn("감지 사용자 : @rupria", text)
         self.assertIn("[saved]", text)
+
+    def test_build_list_text_formats_multiple_filters(self) -> None:
+        text = build_list_text(
+            [WatchTarget("rupria/rupria_tools_bot_etc", "main", "12345678901234567", "saved", "rupria")],
+            ("rupria/rupria_tools_bot_etc", "rupria/gitproject"),
+            ("main", "test"),
+            ("*", "rupria"),
+        )
+        self.assertIn("레포지토리 : rupria/rupria_tools_bot_etc, rupria/gitproject", text)
+        self.assertIn("브랜치 : main, test", text)
+        self.assertIn("감지 사용자 : *, @rupria", text)
 
     def test_build_branch_list_text(self) -> None:
         text = build_branch_list_text(
@@ -97,8 +110,8 @@ class MessageTests(unittest.TestCase):
 
     def test_build_help_text(self) -> None:
         text = build_help_text("!")
-        self.assertIn("!watch branches owner/repo [branch] [user]", text)
-        self.assertIn("/github_branches repository:owner/repo branch:* user:*", text)
+        self.assertIn("!watch add owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]", text)
+        self.assertIn("/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate", text)
 
     def test_build_startup_text(self) -> None:
         text = build_startup_text(
@@ -119,6 +132,26 @@ class MessageTests(unittest.TestCase):
         )
         self.assertIn("감시 대상: 3개", text)
         self.assertIn("새 알림: 2개", text)
+
+    def test_build_watch_batch_added_text(self) -> None:
+        watch = WatchTarget("rupria/gitproject", "main", "12345678901234567", user="*")
+        text = build_watch_batch_added_text(
+            [watch],
+            {"rupria/gitproject::main::*::12345678901234567": "abcdef1234567890"},
+            [],
+        )
+        self.assertIn("감시를 추가했습니다.", text)
+        self.assertIn("기준 SHA: abcdef1", text)
+
+    def test_build_watch_batch_removed_text(self) -> None:
+        removed = [WatchTarget("rupria/gitproject", "main", "12345678901234567", user="*")]
+        missing = [WatchTarget("rupria/gitproject", "test", "12345678901234567", user="rupria")]
+        locked = [WatchTarget("rupria/gitproject", "dev", "12345678901234567", "env", "*")]
+        text = build_watch_batch_removed_text(removed, missing, locked)
+        self.assertIn("감시 제거를 완료했습니다.", text)
+        self.assertIn("제거: 1개", text)
+        self.assertIn("찾지 못함: 1개", text)
+        self.assertIn("WATCH_TARGETS 고정: 1개", text)
 
 
 if __name__ == "__main__":

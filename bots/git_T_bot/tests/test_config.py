@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from git_t_bot.config import WatchTarget, create_watch_key, dedupe_watches, normalize_repository, parse_watch_targets
+from git_t_bot.config import (
+    WatchTarget,
+    create_watch_key,
+    dedupe_watches,
+    normalize_branch_targets,
+    normalize_repository,
+    normalize_repository_targets,
+    normalize_user_targets,
+    parse_watch_targets,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -34,6 +43,21 @@ class ConfigTests(unittest.TestCase):
             create_watch_key(watches[0]),
             "rupria/rupria_tools_bot_etc::main::rupria::12345678901234567",
         )
+
+    def test_normalize_repository_targets_supports_multiple_values(self) -> None:
+        self.assertEqual(
+            normalize_repository_targets("rupria/rupria_tools_bot_etc, https://github.com/rupria/gitproject"),
+            ("rupria/rupria_tools_bot_etc", "rupria/gitproject"),
+        )
+
+    def test_normalize_branch_targets_dedupes_values(self) -> None:
+        self.assertEqual(
+            normalize_branch_targets("main, test, main"),
+            ("main", "test"),
+        )
+
+    def test_normalize_user_targets_collapse_wildcard(self) -> None:
+        self.assertEqual(normalize_user_targets("rupria, *"), ("*",))
 
 
 if __name__ == "__main__":

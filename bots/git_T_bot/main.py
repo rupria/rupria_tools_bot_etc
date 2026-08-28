@@ -14,9 +14,9 @@ from git_t_bot.config import (
     create_watch_key,
     dedupe_watches,
     load_settings,
-    normalize_branch,
-    normalize_repository,
-    normalize_user,
+    normalize_branch_targets,
+    normalize_repository_targets,
+    normalize_user_targets,
 )
 from git_t_bot.github_client import GitHubClient
 from git_t_bot.messages import (
@@ -27,8 +27,8 @@ from git_t_bot.messages import (
     build_poll_summary_text,
     build_repository_branch_catalog_text,
     build_startup_text,
-    build_watch_added_text,
-    build_watch_removed_text,
+    build_watch_batch_added_text,
+    build_watch_batch_removed_text,
 )
 from git_t_bot.storage import (
     ensure_data_dir,
@@ -119,37 +119,50 @@ def is_interaction_authorized(interaction: discord.Interaction) -> bool:
     return is_member_authorized(interaction.user)
 
 
-def normalize_repository_filter(value: str | None) -> str:
-    if value is None or not value.strip() or value.strip() == "*":
-        return "*"
-    return normalize_repository(value)
+def normalize_repository_filters(value: str | None) -> tuple[str, ...]:
+    if value is None or not value.strip():
+        return ("*",)
+    return normalize_repository_targets(value)
 
 
-def normalize_branch_filter(value: str | None) -> str:
-    if value is None or not value.strip() or value.strip() == "*":
-        return "*"
-    return normalize_branch(value)
+def normalize_branch_filters(value: str | None) -> tuple[str, ...]:
+    if value is None or not value.strip():
+        return ("*",)
+    return normalize_branch_targets(value)
 
 
-def normalize_user_filter(value: str | None) -> str:
-    if value is None or not value.strip() or value.strip() == "*":
-        return "*"
-    return normalize_user(value)
+def normalize_user_filters(value: str | None) -> tuple[str, ...]:
+    if value is None or not value.strip():
+        return ("*",)
+    return normalize_user_targets(value)
+
+
+def is_wildcard_filter(values: tuple[str, ...]) -> bool:
+    return len(values) == 1 and values[0] == "*"
+
+
+def build_match_set(values: tuple[str, ...]) -> set[str] | None:
+    if is_wildcard_filter(values):
+        return None
+    return {value.lower() for value in values}
 
 
 def filter_watches(
     watches: list[WatchTarget],
-    repository: str = "*",
-    branch: str = "*",
-    user: str = "*",
+    repositories: tuple[str, ...] = ("*",),
+    branches: tuple[str, ...] = ("*",),
+    users: tuple[str, ...] = ("*",),
 ) -> list[WatchTarget]:
+    repository_matches = build_match_set(repositories)
+    branch_matches = build_match_set(branches)
+    user_matches = build_match_set(users)
     filtered: list[WatchTarget] = []
     for watch in watches:
-        if repository != "*" and watch.repository.lower() != repository.lower():
+        if repository_matches is not None and watch.repository.lower() not in repository_matches:
             continue
-        if branch != "*" and watch.branch.lower() != branch.lower():
+        if branch_matches is not None and watch.branch.lower() not in branch_matches:
             continue
-        if user != "*" and watch.user.lower() != user.lower():
+        if user_matches is not None and watch.user.lower() not in user_matches:
             continue
         filtered.append(watch)
     return filtered
@@ -178,22 +191,38 @@ def resolve_channel_argument(
 def parse_watch_extra_arguments(
     ctx: commands.Context[commands.Bot],
     extra: tuple[str, ...],
-) -> tuple[str, discord.TextChannel | discord.Thread]:
+) -> tuple[tuple[str, ...], discord.TextChannel | discord.Thread]:
     if not isinstance(ctx.channel, (discord.TextChannel, discord.Thread)):
         raise commands.BadArgument("텍스트 채널 또는 스레드에서만 감시를 등록할 수 있습니다.")
 
-    user = "*"
+    user_inputs: list[str] = []
     target_channel: discord.TextChannel | discord.Thread = ctx.channel
     for item in extra:
         maybe_channel = resolve_channel_argument(ctx.guild, item)
         if maybe_channel is not None:
             target_channel = maybe_channel
             continue
-        if user != "*":
-            raise commands.BadArgument("사용자는 한 명만 지정할 수 있습니다.")
-        user = normalize_user_filter(item)
+        user_inputs.append(item)
 
-    return user, target_channel
+    if not user_inputs:
+        return ("*",), target_channel
+    return normalize_user_targets(",".join(user_inputs)), target_channel
+
+
+def build_watch_targets(
+    repositories: tuple[str, ...],
+    branches: tuple[str, ...],
+    users: tuple[str, ...],
+    channel_id: str,
+) -> list[WatchTarget]:
+    return dedupe_watches(
+        [
+            WatchTarget(repository=repository, branch=branch, channel_id=channel_id, user=user)
+            for repository in repositories
+            for branch in branches
+            for user in users
+        ]
+    )
 
 
 def author_matches_filter(author_name: str, user: str) -> bool:
@@ -233,27 +262,47 @@ async def reply_interaction(
 
 async def build_repository_branch_catalog(
     repository: str,
-    branch: str = "*",
-    user: str = "*",
+    branch_filters: tuple[str, ...] = ("*",),
+    user_filters: tuple[str, ...] = ("*",),
 ) -> str:
     session = await get_session()
     branches = await github.list_branches(session, repository)
+    branch_names = None if is_wildcard_filter(branch_filters) else {item.lower() for item in branch_filters}
     filtered_branches = tuple(
         branch_info
         for branch_info in sorted(branches, key=lambda item: item.name.lower())
-        if branch == "*" or branch_info.name.lower() == branch.lower()
+        if branch_names is None or branch_info.name.lower() in branch_names
     )
-    matching_watches = filter_watches(get_all_watches(), repository, branch, user)
+    matching_watches = filter_watches(get_all_watches(), (repository,), branch_filters, user_filters)
     if not filtered_branches:
         return "\n".join(
             [
                 "조건과 일치하는 GitHub 브랜치를 찾지 못했습니다.",
                 f"레포지토리 : {repository}",
-                f"브랜치 : {branch}",
-                f"감지 사용자 : {'*' if user == '*' else f'@{user}'}",
+                f"브랜치 : {', '.join(branch_filters)}",
+                f"감지 사용자 : {', '.join('*' if user == '*' else f'@{user}' for user in user_filters)}",
             ]
         )
-    return build_repository_branch_catalog_text(repository, filtered_branches, matching_watches, branch, user)
+    return build_repository_branch_catalog_text(
+        repository,
+        filtered_branches,
+        matching_watches,
+        branch_filters,
+        user_filters,
+    )
+
+
+async def build_repository_branch_catalogs(
+    repositories: tuple[str, ...],
+    branch_filters: tuple[str, ...],
+    user_filters: tuple[str, ...],
+) -> str:
+    return "\n\n".join(
+        [
+            await build_repository_branch_catalog(repository, branch_filters, user_filters)
+            for repository in repositories
+        ]
+    )
 
 
 async def reply(ctx: commands.Context[commands.Bot], content: str) -> None:
@@ -298,12 +347,21 @@ async def get_session() -> aiohttp.ClientSession:
     return http_session
 
 
-async def bootstrap_watch(watch: WatchTarget) -> str:
+async def bootstrap_watches(watches: list[WatchTarget]) -> dict[str, str]:
     session = await get_session()
-    latest_commit = await github.get_latest_commit(session, watch.repository, watch.branch)
-    set_head_state(watch, latest_commit.sha)
+    cached_heads: dict[tuple[str, str], str] = {}
+    latest_shas: dict[str, str] = {}
+    for watch in watches:
+        branch_key = (watch.repository.lower(), watch.branch.lower())
+        latest_sha = cached_heads.get(branch_key)
+        if latest_sha is None:
+            latest_commit = await github.get_latest_commit(session, watch.repository, watch.branch)
+            latest_sha = latest_commit.sha
+            cached_heads[branch_key] = latest_sha
+        set_head_state(watch, latest_sha)
+        latest_shas[create_watch_key(watch)] = latest_sha
     save_runtime_state(settings.state_file, runtime_state)
-    return latest_commit.sha
+    return latest_shas
 
 
 async def announce_watch_error(watch: WatchTarget, error: Exception) -> None:
@@ -444,15 +502,15 @@ async def watch_list(
         await reply(ctx, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
         return
     try:
-        normalized_repository = normalize_repository_filter(repository)
-        normalized_branch = normalize_branch_filter(branch)
-        normalized_user = normalize_user_filter(user)
+        normalized_repositories = normalize_repository_filters(repository)
+        normalized_branches = normalize_branch_filters(branch)
+        normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply(ctx, str(error))
         return
 
-    watches = filter_watches(get_all_watches(), normalized_repository, normalized_branch, normalized_user)
-    await reply(ctx, build_list_text(watches, normalized_repository, normalized_branch, normalized_user))
+    watches = filter_watches(get_all_watches(), normalized_repositories, normalized_branches, normalized_users)
+    await reply(ctx, build_list_text(watches, normalized_repositories, normalized_branches, normalized_users))
 
 
 @watch_group.command(name="branches")
@@ -467,20 +525,20 @@ async def watch_branches(
         return
 
     try:
-        normalized_branch = normalize_branch_filter(branch)
-        normalized_user = normalize_user_filter(user)
+        normalized_branches = normalize_branch_filters(branch)
+        normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply(ctx, str(error))
         return
 
     if not repository or repository.strip() == "*":
-        watches = filter_watches(get_all_watches(), "*", normalized_branch, normalized_user)
-        await reply(ctx, build_branch_list_text(watches, None, normalized_branch, normalized_user))
+        watches = filter_watches(get_all_watches(), ("*",), normalized_branches, normalized_users)
+        await reply(ctx, build_branch_list_text(watches, None, normalized_branches, normalized_users))
         return
 
     try:
-        normalized_repository = normalize_repository(repository)
-        text = await build_repository_branch_catalog(normalized_repository, normalized_branch, normalized_user)
+        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
+        text = await build_repository_branch_catalogs(normalized_repositories, normalized_branches, normalized_users)
     except Exception as error:
         await reply(ctx, str(error))
         return
@@ -510,41 +568,31 @@ async def watch_add(
         return
 
     try:
-        normalized_repository = normalize_repository(repository)
-        normalized_branch = normalize_branch(branch)
-        if normalized_branch == "*":
-            await reply(ctx, "감시 추가는 실제 브랜치 이름이 필요합니다. 전체 조회는 `*`를 사용해 주세요.")
-            return
-        normalized_user, target_channel = parse_watch_extra_arguments(ctx, extra)
+        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
+        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
+        normalized_users, target_channel = parse_watch_extra_arguments(ctx, extra)
     except ValueError as error:
         await reply(ctx, str(error))
         return
 
-    watch = WatchTarget(
-        repository=normalized_repository,
-        branch=normalized_branch,
-        channel_id=str(target_channel.id),
-        user=normalized_user,
+    requested_watches = build_watch_targets(
+        normalized_repositories,
+        normalized_branches,
+        normalized_users,
+        str(target_channel.id),
     )
-    if any(create_watch_key(item) == create_watch_key(watch) for item in get_all_watches()):
-        await reply(
-            ctx,
-            "\n".join(
-                [
-                    "이미 감시 중입니다.",
-                    f"레포지토리 : {watch.repository}",
-                    f"브랜치 : {watch.branch}",
-                    f"감지 사용자 : {'*' if watch.user == '*' else f'@{watch.user}'}",
-                    f"채널 : <#{watch.channel_id}>",
-                ]
-            ),
-        )
+    existing_keys = {create_watch_key(item) for item in get_all_watches()}
+    existing_watches = [watch for watch in requested_watches if create_watch_key(watch) in existing_keys]
+    new_watches = [watch for watch in requested_watches if create_watch_key(watch) not in existing_keys]
+
+    if not new_watches:
+        await reply(ctx, build_watch_batch_added_text([], {}, existing_watches))
         return
 
-    latest_sha = await bootstrap_watch(watch)
-    saved_watches = dedupe_watches([*saved_watches, watch])
+    latest_shas = await bootstrap_watches(new_watches)
+    saved_watches = dedupe_watches([*saved_watches, *new_watches])
     save_persisted_watches(settings.watch_file, saved_watches)
-    await reply(ctx, build_watch_added_text(watch, latest_sha))
+    await reply(ctx, build_watch_batch_added_text(new_watches, latest_shas, existing_watches))
 
 
 @watch_group.command(name="remove")
@@ -560,48 +608,36 @@ async def watch_remove(
         return
 
     try:
-        normalized_repository = normalize_repository(repository)
-        normalized_branch = normalize_branch(branch)
-        if normalized_branch == "*":
-            await reply(ctx, "감시 제거는 실제 브랜치 이름이 필요합니다.")
-            return
-        normalized_user, target_channel = parse_watch_extra_arguments(ctx, extra)
+        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
+        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
+        normalized_users, target_channel = parse_watch_extra_arguments(ctx, extra)
     except ValueError as error:
         await reply(ctx, str(error))
         return
 
-    watch = WatchTarget(
-        repository=normalized_repository,
-        branch=normalized_branch,
-        channel_id=str(target_channel.id),
-        user=normalized_user,
+    requested_watches = build_watch_targets(
+        normalized_repositories,
+        normalized_branches,
+        normalized_users,
+        str(target_channel.id),
     )
+    startup_keys = {create_watch_key(item) for item in settings.startup_watches}
+    saved_keys = {create_watch_key(item) for item in saved_watches}
+    locked_watches = [watch for watch in requested_watches if create_watch_key(watch) in startup_keys]
+    removed_watches = [watch for watch in requested_watches if create_watch_key(watch) in saved_keys]
+    missing_watches = [
+        watch
+        for watch in requested_watches
+        if create_watch_key(watch) not in startup_keys and create_watch_key(watch) not in saved_keys
+    ]
 
-    if any(create_watch_key(item) == create_watch_key(watch) for item in settings.startup_watches):
-        await reply(ctx, "이 감시는 WATCH_TARGETS 환경변수에서 온 항목이라 채팅 명령으로 지울 수 없습니다.")
-        return
-
-    before = len(saved_watches)
-    saved_watches = [item for item in saved_watches if create_watch_key(item) != create_watch_key(watch)]
-    if before == len(saved_watches):
-        await reply(
-            ctx,
-            "\n".join(
-                [
-                    "일치하는 감시 대상을 찾지 못했습니다.",
-                    f"레포지토리 : {watch.repository}",
-                    f"브랜치 : {watch.branch}",
-                    f"감지 사용자 : {'*' if watch.user == '*' else f'@{watch.user}'}",
-                    f"채널 : <#{watch.channel_id}>",
-                ]
-            ),
-        )
-        return
-
-    runtime_state["branches"].pop(create_watch_key(watch), None)
+    removed_keys = {create_watch_key(watch) for watch in removed_watches}
+    saved_watches = [item for item in saved_watches if create_watch_key(item) not in removed_keys]
+    for watch in removed_watches:
+        runtime_state["branches"].pop(create_watch_key(watch), None)
     save_persisted_watches(settings.watch_file, saved_watches)
     save_runtime_state(settings.state_file, runtime_state)
-    await reply(ctx, build_watch_removed_text(watch))
+    await reply(ctx, build_watch_batch_removed_text(removed_watches, missing_watches, locked_watches))
 
 
 @watch_group.command(name="test")
@@ -632,9 +668,9 @@ async def watch_test(
 
 @bot.tree.command(name="github_watches", description="현재 감시 설정을 조회합니다.")
 @app_commands.describe(
-    repository="owner/repo 형식 또는 *",
-    branch="브랜치명 또는 *",
-    user="GitHub 사용자명 또는 *",
+    repository="owner/repo 형식 또는 *. 여러 개는 쉼표로 구분합니다.",
+    branch="브랜치명 또는 *. 여러 개는 쉼표로 구분합니다.",
+    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
 )
 async def github_watches_command(
     interaction: discord.Interaction,
@@ -647,25 +683,25 @@ async def github_watches_command(
         return
 
     try:
-        normalized_repository = normalize_repository_filter(repository)
-        normalized_branch = normalize_branch_filter(branch)
-        normalized_user = normalize_user_filter(user)
+        normalized_repositories = normalize_repository_filters(repository)
+        normalized_branches = normalize_branch_filters(branch)
+        normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply_interaction(interaction, str(error))
         return
 
-    watches = filter_watches(get_all_watches(), normalized_repository, normalized_branch, normalized_user)
+    watches = filter_watches(get_all_watches(), normalized_repositories, normalized_branches, normalized_users)
     await reply_interaction(
         interaction,
-        build_list_text(watches, normalized_repository, normalized_branch, normalized_user),
+        build_list_text(watches, normalized_repositories, normalized_branches, normalized_users),
     )
 
 
 @bot.tree.command(name="github_branches", description="저장소의 GitHub 브랜치와 감시 연결 상태를 조회합니다.")
 @app_commands.describe(
-    repository="owner/repo 형식",
-    branch="브랜치명 또는 *",
-    user="GitHub 사용자명 또는 *",
+    repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
+    branch="브랜치명 또는 *. 여러 개는 쉼표로 구분합니다.",
+    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
 )
 async def github_branches_command(
     interaction: discord.Interaction,
@@ -678,16 +714,16 @@ async def github_branches_command(
         return
 
     try:
-        normalized_repository = normalize_repository(repository)
-        normalized_branch = normalize_branch_filter(branch)
-        normalized_user = normalize_user_filter(user)
+        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
+        normalized_branches = normalize_branch_filters(branch)
+        normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply_interaction(interaction, str(error))
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        text = await build_repository_branch_catalog(normalized_repository, normalized_branch, normalized_user)
+        text = await build_repository_branch_catalogs(normalized_repositories, normalized_branches, normalized_users)
     except Exception as error:
         await reply_interaction(interaction, str(error))
         return
@@ -697,9 +733,9 @@ async def github_branches_command(
 
 @bot.tree.command(name="github_watch", description="GitHub 저장소의 push 알림을 현재 채널에 등록합니다.")
 @app_commands.describe(
-    repository="owner/repo 형식",
-    branch="실제 감시할 브랜치명",
-    user="GitHub 사용자명 또는 *",
+    repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
+    branch="실제 감시할 브랜치명. 여러 개는 쉼표로 구분합니다.",
+    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
     channel="비워두면 현재 채널을 사용합니다.",
 )
 async def github_watch_command(
@@ -719,12 +755,9 @@ async def github_watch_command(
         return
 
     try:
-        normalized_repository = normalize_repository(repository)
-        normalized_branch = normalize_branch(branch)
-        if normalized_branch == "*":
-            await reply_interaction(interaction, "감시 추가는 실제 브랜치 이름이 필요합니다. 전체 조회는 `*`를 사용해 주세요.")
-            return
-        normalized_user = normalize_user_filter(user)
+        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
+        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
+        normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply_interaction(interaction, str(error))
         return
@@ -734,39 +767,32 @@ async def github_watch_command(
         await reply_interaction(interaction, "텍스트 채널 또는 스레드만 감시 채널로 사용할 수 있습니다.")
         return
 
-    watch = WatchTarget(
-        repository=normalized_repository,
-        branch=normalized_branch,
-        channel_id=str(target_channel.id),
-        user=normalized_user,
+    requested_watches = build_watch_targets(
+        normalized_repositories,
+        normalized_branches,
+        normalized_users,
+        str(target_channel.id),
     )
-    if any(create_watch_key(item) == create_watch_key(watch) for item in get_all_watches()):
-        await reply_interaction(
-            interaction,
-            "\n".join(
-                [
-                    "이미 감시 중입니다.",
-                    f"레포지토리 : {watch.repository}",
-                    f"브랜치 : {watch.branch}",
-                    f"감지 사용자 : {'*' if watch.user == '*' else f'@{watch.user}'}",
-                    f"채널 : <#{watch.channel_id}>",
-                ]
-            ),
-        )
-        return
+    existing_keys = {create_watch_key(item) for item in get_all_watches()}
+    existing_watches = [watch for watch in requested_watches if create_watch_key(watch) in existing_keys]
+    new_watches = [watch for watch in requested_watches if create_watch_key(watch) not in existing_keys]
 
     await interaction.response.defer(ephemeral=True, thinking=True)
-    latest_sha = await bootstrap_watch(watch)
-    saved_watches = dedupe_watches([*saved_watches, watch])
+    if not new_watches:
+        await reply_interaction(interaction, build_watch_batch_added_text([], {}, existing_watches))
+        return
+
+    latest_shas = await bootstrap_watches(new_watches)
+    saved_watches = dedupe_watches([*saved_watches, *new_watches])
     save_persisted_watches(settings.watch_file, saved_watches)
-    await reply_interaction(interaction, build_watch_added_text(watch, latest_sha))
+    await reply_interaction(interaction, build_watch_batch_added_text(new_watches, latest_shas, existing_watches))
 
 
 @bot.tree.command(name="github_unwatch", description="현재 채널에서 GitHub 저장소 감시를 해제합니다.")
 @app_commands.describe(
-    repository="owner/repo 형식",
-    branch="제거할 브랜치명",
-    user="GitHub 사용자명 또는 *",
+    repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
+    branch="제거할 브랜치명. 여러 개는 쉼표로 구분합니다.",
+    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
     channel="비워두면 현재 채널을 사용합니다.",
 )
 async def github_unwatch_command(
@@ -786,12 +812,9 @@ async def github_unwatch_command(
         return
 
     try:
-        normalized_repository = normalize_repository(repository)
-        normalized_branch = normalize_branch(branch)
-        if normalized_branch == "*":
-            await reply_interaction(interaction, "감시 제거는 실제 브랜치 이름이 필요합니다.")
-            return
-        normalized_user = normalize_user_filter(user)
+        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
+        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
+        normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply_interaction(interaction, str(error))
         return
@@ -801,38 +824,29 @@ async def github_unwatch_command(
         await reply_interaction(interaction, "텍스트 채널 또는 스레드만 감시 채널로 사용할 수 있습니다.")
         return
 
-    watch = WatchTarget(
-        repository=normalized_repository,
-        branch=normalized_branch,
-        channel_id=str(target_channel.id),
-        user=normalized_user,
+    requested_watches = build_watch_targets(
+        normalized_repositories,
+        normalized_branches,
+        normalized_users,
+        str(target_channel.id),
     )
+    startup_keys = {create_watch_key(item) for item in settings.startup_watches}
+    saved_keys = {create_watch_key(item) for item in saved_watches}
+    locked_watches = [watch for watch in requested_watches if create_watch_key(watch) in startup_keys]
+    removed_watches = [watch for watch in requested_watches if create_watch_key(watch) in saved_keys]
+    missing_watches = [
+        watch
+        for watch in requested_watches
+        if create_watch_key(watch) not in startup_keys and create_watch_key(watch) not in saved_keys
+    ]
 
-    if any(create_watch_key(item) == create_watch_key(watch) for item in settings.startup_watches):
-        await reply_interaction(interaction, "이 감시는 WATCH_TARGETS 환경변수에서 온 항목이라 채팅 명령으로 지울 수 없습니다.")
-        return
-
-    before = len(saved_watches)
-    saved_watches = [item for item in saved_watches if create_watch_key(item) != create_watch_key(watch)]
-    if before == len(saved_watches):
-        await reply_interaction(
-            interaction,
-            "\n".join(
-                [
-                    "일치하는 감시 대상을 찾지 못했습니다.",
-                    f"레포지토리 : {watch.repository}",
-                    f"브랜치 : {watch.branch}",
-                    f"감지 사용자 : {'*' if watch.user == '*' else f'@{watch.user}'}",
-                    f"채널 : <#{watch.channel_id}>",
-                ]
-            ),
-        )
-        return
-
-    runtime_state["branches"].pop(create_watch_key(watch), None)
+    removed_keys = {create_watch_key(watch) for watch in removed_watches}
+    saved_watches = [item for item in saved_watches if create_watch_key(item) not in removed_keys]
+    for watch in removed_watches:
+        runtime_state["branches"].pop(create_watch_key(watch), None)
     save_persisted_watches(settings.watch_file, saved_watches)
     save_runtime_state(settings.state_file, runtime_state)
-    await reply_interaction(interaction, build_watch_removed_text(watch))
+    await reply_interaction(interaction, build_watch_batch_removed_text(removed_watches, missing_watches, locked_watches))
 
 
 @watch_group.error

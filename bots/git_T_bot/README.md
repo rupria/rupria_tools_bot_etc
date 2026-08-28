@@ -22,17 +22,18 @@
 !watch branches owner/repo
 !watch branches owner/repo main rupria
 !watch add owner/repo main
-!watch add owner/repo dev rupria #alerts
-!watch remove owner/repo main
+!watch add owner/repo,owner/repo2 main,test rupria,teammate #alerts
+!watch remove owner/repo,owner/repo2 main,test
 !watch check
 !watch test
 /github_watches repository:* branch:* user:*
-/github_branches repository:owner/repo branch:* user:*
-/github_watch repository:owner/repo branch:main user:* channel:#alerts
-/github_unwatch repository:owner/repo branch:main user:* channel:#alerts
+/github_branches repository:owner/repo,owner/repo2 branch:main,test user:rupria,teammate
+/github_watch repository:owner/repo,owner/repo2 branch:main,test user:rupria,teammate channel:#alerts
+/github_unwatch repository:owner/repo,owner/repo2 branch:main,test user:rupria,teammate channel:#alerts
 ```
 
 - `*`는 전체를 뜻한다.
+- 여러 레포지토리, 브랜치, 사용자는 쉼표로 한 번에 입력할 수 있다.
 - 채널을 따로 적지 않으면 현재 채널에 연결한다.
 - 사용자를 따로 적지 않으면 `*`로 저장되어 모든 작성자를 감지한다.
 - `!watch branches`는 저장소와 브랜치별로 묶어서 현재 감시 현황을 보여준다.

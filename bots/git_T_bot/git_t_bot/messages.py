@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import discord
 
-from .config import WatchTarget
+from .config import WatchTarget, create_watch_key
 from .github_client import BranchInfo, ChangedFileInfo, CommitInfo, CompareCommitInfo, CompareInfo
 
 
@@ -89,6 +89,25 @@ def format_watch_user(user: str) -> str:
     return "*" if user == "*" else f"@{user}"
 
 
+def format_filter_value(value: str | tuple[str, ...]) -> str:
+    if isinstance(value, tuple):
+        return ", ".join(value)
+    return value
+
+
+def format_user_filter_value(value: str | tuple[str, ...]) -> str:
+    if isinstance(value, tuple):
+        return ", ".join(format_watch_user(item) for item in value)
+    return format_watch_user(value)
+
+
+def format_watch_target_line(watch: WatchTarget, latest_sha: str | None = None) -> str:
+    line = f"{watch.repository} / {watch.branch} / {format_watch_user(watch.user)} -> <#{watch.channel_id}>"
+    if latest_sha:
+        return f"{line} ({short_sha(latest_sha)})"
+    return line
+
+
 def build_commit_embed(
     watch: WatchTarget,
     previous_sha: str,
@@ -145,51 +164,49 @@ def build_help_text(prefix: str) -> str:
             "사용 가능한 명령",
             f"{prefix}watch list [repository] [branch] [user]",
             f"{prefix}watch branches owner/repo [branch] [user]",
-            f"{prefix}watch add owner/repo branch [user] [#channel]",
-            f"{prefix}watch remove owner/repo branch [user] [#channel]",
+            f"{prefix}watch add owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]",
+            f"{prefix}watch remove owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]",
             f"{prefix}watch check",
             f"{prefix}watch test [#channel]",
             "/github_watches repository:* branch:* user:*",
-            "/github_branches repository:owner/repo branch:* user:*",
-            "/github_watch repository:owner/repo branch:main user:* channel:#alerts",
-            "/github_unwatch repository:owner/repo branch:main user:* channel:#alerts",
+            "/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate",
+            "/github_watch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
+            "/github_unwatch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
         ]
     )
 
 
 def build_list_text(
     watches: list[WatchTarget],
-    repository: str = "*",
-    branch: str = "*",
-    user: str = "*",
+    repository: str | tuple[str, ...] = "*",
+    branch: str | tuple[str, ...] = "*",
+    user: str | tuple[str, ...] = "*",
 ) -> str:
     if not watches:
         return "\n".join(
             [
                 "조건과 일치하는 감시 대상이 없습니다.",
-                f"레포지토리 : {repository}",
-                f"브랜치 : {branch}",
-                f"감지 사용자 : {format_watch_user(user)}",
+                f"레포지토리 : {format_filter_value(repository)}",
+                f"브랜치 : {format_filter_value(branch)}",
+                f"감지 사용자 : {format_user_filter_value(user)}",
             ]
         )
     lines = [
         f"현재 감시 대상 {len(watches)}개",
-        f"레포지토리 : {repository}",
-        f"브랜치 : {branch}",
-        f"감지 사용자 : {format_watch_user(user)}",
+        f"레포지토리 : {format_filter_value(repository)}",
+        f"브랜치 : {format_filter_value(branch)}",
+        f"감지 사용자 : {format_user_filter_value(user)}",
     ]
     for index, watch in enumerate(watches, start=1):
-        lines.append(
-            f"{index}. {watch.repository} / {watch.branch} / {format_watch_user(watch.user)} -> <#{watch.channel_id}> [{watch.source}]"
-        )
+        lines.append(f"{index}. {format_watch_target_line(watch)} [{watch.source}]")
     return "\n".join(lines)
 
 
 def build_branch_list_text(
     watches: list[WatchTarget],
     repository: str | None = None,
-    branch: str = "*",
-    user: str = "*",
+    branch: str | tuple[str, ...] = "*",
+    user: str | tuple[str, ...] = "*",
 ) -> str:
     if not watches:
         if repository:
@@ -197,8 +214,8 @@ def build_branch_list_text(
                 [
                     "조건과 일치하는 감시 대상을 찾지 못했습니다.",
                     f"레포지토리 : {repository}",
-                    f"브랜치 : {branch}",
-                    f"감지 사용자 : {format_watch_user(user)}",
+                    f"브랜치 : {format_filter_value(branch)}",
+                    f"감지 사용자 : {format_user_filter_value(user)}",
                 ]
             )
         return "현재 등록된 감시 대상이 없습니다."
@@ -213,8 +230,8 @@ def build_branch_list_text(
 
     lines = [
         f"{heading} {len(watches)}개",
-        f"브랜치 : {branch}",
-        f"감지 사용자 : {format_watch_user(user)}",
+        f"브랜치 : {format_filter_value(branch)}",
+        f"감지 사용자 : {format_user_filter_value(user)}",
     ]
     for repo_name, branches in grouped.items():
         lines.append(repo_name)
@@ -231,16 +248,16 @@ def build_repository_branch_catalog_text(
     repository: str,
     branches: tuple[BranchInfo, ...],
     watches: list[WatchTarget],
-    branch: str = "*",
-    user: str = "*",
+    branch: str | tuple[str, ...] = "*",
+    user: str | tuple[str, ...] = "*",
 ) -> str:
     if not branches:
         return f"{repository} 저장소에서 브랜치를 찾지 못했습니다."
 
     lines = [
         f"{repository} 브랜치 목록 {len(branches)}개",
-        f"브랜치 : {branch}",
-        f"감지 사용자 : {format_watch_user(user)}",
+        f"브랜치 : {format_filter_value(branch)}",
+        f"감지 사용자 : {format_user_filter_value(user)}",
     ]
     watches_by_branch: dict[str, list[WatchTarget]] = {}
     for watch in sorted(watches, key=lambda item: (item.branch, item.user, item.channel_id)):
@@ -287,6 +304,71 @@ def build_watch_removed_text(watch: WatchTarget) -> str:
             f"채널 : <#{watch.channel_id}>",
         ]
     )
+
+
+def build_watch_batch_added_text(
+    added_watches: list[WatchTarget],
+    latest_shas: dict[str, str],
+    existing_watches: list[WatchTarget],
+) -> str:
+    if len(added_watches) == 1 and not existing_watches:
+        watch = added_watches[0]
+        return build_watch_added_text(watch, latest_shas[create_watch_key(watch)])
+
+    lines = [
+        "감시 추가를 완료했습니다.",
+        f"추가: {len(added_watches)}개",
+        f"이미 등록됨: {len(existing_watches)}개",
+    ]
+    if added_watches:
+        lines.append("추가된 대상")
+        for index, watch in enumerate(added_watches[:10], start=1):
+            latest_sha = latest_shas.get(create_watch_key(watch), "")
+            lines.append(f"{index}. {format_watch_target_line(watch, latest_sha)}")
+        if len(added_watches) > 10:
+            lines.append(f"... 외 {len(added_watches) - 10}개")
+    if existing_watches:
+        lines.append("이미 등록된 대상")
+        for index, watch in enumerate(existing_watches[:10], start=1):
+            lines.append(f"{index}. {format_watch_target_line(watch)}")
+        if len(existing_watches) > 10:
+            lines.append(f"... 외 {len(existing_watches) - 10}개")
+    return "\n".join(lines)
+
+
+def build_watch_batch_removed_text(
+    removed_watches: list[WatchTarget],
+    missing_watches: list[WatchTarget],
+    locked_watches: list[WatchTarget],
+) -> str:
+    if len(removed_watches) == 1 and not missing_watches and not locked_watches:
+        return build_watch_removed_text(removed_watches[0])
+
+    lines = [
+        "감시 제거를 완료했습니다.",
+        f"제거: {len(removed_watches)}개",
+        f"찾지 못함: {len(missing_watches)}개",
+        f"WATCH_TARGETS 고정: {len(locked_watches)}개",
+    ]
+    if removed_watches:
+        lines.append("제거된 대상")
+        for index, watch in enumerate(removed_watches[:10], start=1):
+            lines.append(f"{index}. {format_watch_target_line(watch)}")
+        if len(removed_watches) > 10:
+            lines.append(f"... 외 {len(removed_watches) - 10}개")
+    if missing_watches:
+        lines.append("찾지 못한 대상")
+        for index, watch in enumerate(missing_watches[:10], start=1):
+            lines.append(f"{index}. {format_watch_target_line(watch)}")
+        if len(missing_watches) > 10:
+            lines.append(f"... 외 {len(missing_watches) - 10}개")
+    if locked_watches:
+        lines.append("채팅에서 지울 수 없는 대상")
+        for index, watch in enumerate(locked_watches[:10], start=1):
+            lines.append(f"{index}. {format_watch_target_line(watch)} [env]")
+        if len(locked_watches) > 10:
+            lines.append(f"... 외 {len(locked_watches) - 10}개")
+    return "\n".join(lines)
 
 
 def build_poll_summary_text(result: dict[str, int | bool]) -> str:

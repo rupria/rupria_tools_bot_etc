@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 import os
@@ -88,6 +89,67 @@ def normalize_channel_id(value: str) -> str:
 
 def normalize_watch(watch: WatchTarget) -> WatchTarget:
     return watch.normalized()
+
+
+def split_target_values(value: str) -> tuple[str, ...]:
+    parts = tuple(part.strip() for part in re.split(r"[\r\n,]+", value) if part.strip())
+    if not parts:
+        raise ValueError("대상 값이 비어 있습니다.")
+    return parts
+
+
+def normalize_target_values(
+    value: str,
+    item_normalizer: Callable[[str], str],
+    *,
+    allow_wildcard: bool = True,
+    field_name: str = "대상",
+) -> tuple[str, ...]:
+    normalized_values: list[str] = []
+    seen: set[str] = set()
+    for part in split_target_values(value):
+        if part == "*":
+            if not allow_wildcard:
+                raise ValueError(f"{field_name}에는 *를 사용할 수 없습니다.")
+            return ("*",)
+        normalized = item_normalizer(part)
+        if normalized == "*":
+            if not allow_wildcard:
+                raise ValueError(f"{field_name}에는 *를 사용할 수 없습니다.")
+            return ("*",)
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_values.append(normalized)
+    return tuple(normalized_values)
+
+
+def normalize_repository_targets(value: str, *, allow_wildcard: bool = True) -> tuple[str, ...]:
+    return normalize_target_values(
+        value,
+        normalize_repository,
+        allow_wildcard=allow_wildcard,
+        field_name="레포지토리",
+    )
+
+
+def normalize_branch_targets(value: str, *, allow_wildcard: bool = True) -> tuple[str, ...]:
+    return normalize_target_values(
+        value,
+        normalize_branch,
+        allow_wildcard=allow_wildcard,
+        field_name="브랜치",
+    )
+
+
+def normalize_user_targets(value: str, *, allow_wildcard: bool = True) -> tuple[str, ...]:
+    return normalize_target_values(
+        value,
+        normalize_user,
+        allow_wildcard=allow_wildcard,
+        field_name="사용자",
+    )
 
 
 def create_watch_key(watch: WatchTarget) -> str:
