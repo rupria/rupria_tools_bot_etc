@@ -210,6 +210,11 @@ def load_settings(project_root: Path) -> Settings:
     if poll_interval_ms < 10000:
         raise RuntimeError("WATCH_POLL_INTERVAL_MS는 10000 이상이어야 합니다.")
 
+    polling_enabled = parse_bool(os.getenv("POLLING_ENABLED", "true"), True)
+    github_token = os.getenv("GITHUB_TOKEN", "").strip()
+    if polling_enabled and not github_token:
+        raise RuntimeError("20초 GitHub 감시에는 GITHUB_TOKEN이 필요합니다.")
+
     webhook_port = int(os.getenv("PORT", os.getenv("WEBHOOK_PORT", "8080")))
     if not 1 <= webhook_port <= 65535:
         raise RuntimeError("PORT 또는 WEBHOOK_PORT는 1~65535 범위여야 합니다.")
@@ -224,8 +229,8 @@ def load_settings(project_root: Path) -> Settings:
         guild_id=os.getenv("DISCORD_GUILD_ID", "").strip(),
         admin_channel_id=admin_channel_id,
         allowed_role_ids=parse_csv_list(os.getenv("DISCORD_ALLOWED_ROLE_IDS", "")),
-        github_token=os.getenv("GITHUB_TOKEN", "").strip(),
-        polling_enabled=parse_bool(os.getenv("POLLING_ENABLED", "true"), True),
+        github_token=github_token,
+        polling_enabled=polling_enabled,
         poll_interval_ms=poll_interval_ms,
         webhook_secret=os.getenv("GITHUB_WEBHOOK_SECRET", "").strip(),
         webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0").strip() or "0.0.0.0",

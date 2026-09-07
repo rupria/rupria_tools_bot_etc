@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import time
 from urllib.parse import quote
 
 import aiohttp
@@ -13,6 +15,7 @@ class CommitInfo:
     message: str
     author_name: str
     committed_at: str
+    author_email: str = ""
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,7 @@ class CompareCommitInfo:
     html_url: str
     message: str
     author_name: str
+    author_email: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,14 +50,36 @@ class BranchInfo:
 
 
 class GitHubApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int | None = None, retry_after: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
 
 
 class GitHubClient:
     def __init__(self, token: str) -> None:
         self.token = token
+        self.blocked_until = 0.0
+
+    @staticmethod
+    def _retry_after_seconds(response: aiohttp.ClientResponse) -> int:
+        retry_after = response.headers.get("Retry-After", "").strip()
+        if retry_after.isdigit():
+            return max(int(retry_after), 1)
+        reset_at = response.headers.get("X-RateLimit-Reset", "").strip()
+        if response.headers.get("X-RateLimit-Remaining") == "0" and reset_at.isdigit():
+            return max(int(reset_at) - int(time.time()) + 1, 1)
+        return 60
 
     async def _request(self, session: aiohttp.ClientSession, endpoint: str) -> object:
+        remaining_backoff = self.blocked_until - time.monotonic()
+        if remaining_backoff > 0:
+            retry_after = math.ceil(remaining_backoff)
+            raise GitHubApiError(
+                f"GitHub API 재시도 대기 중입니다. {retry_after}초 후 다시 확인합니다.",
+                status=403,
+                retry_after=retry_after,
+            )
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "git_T_bot/1.0",
@@ -64,8 +90,29 @@ class GitHubClient:
         async with session.get(f"https://api.github.com{endpoint}", headers=headers, timeout=20) as response:
             if response.status >= 400:
                 detail = await response.text()
-                raise GitHubApiError(f"GitHub API 요청 실패 ({response.status}): {detail[:300]}")
+                retry_after = 0
+                if response.status in {403, 429}:
+                    retry_after = self._retry_after_seconds(response)
+                    self.blocked_until = time.monotonic() + retry_after
+                raise GitHubApiError(
+                    f"GitHub API 요청 실패 ({response.status}): {detail[:300]}",
+                    status=response.status,
+                    retry_after=retry_after,
+                )
             return await response.json()
+
+    async def get_default_branch(self, session: aiohttp.ClientSession, repository: str) -> str:
+        owner, repo = repository.split("/", 1)
+        data = await self._request(
+            session,
+            f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}",
+        )
+        if not isinstance(data, dict):
+            raise GitHubApiError("GitHub 저장소 응답 형식이 예상과 다릅니다.")
+        branch = str(data.get("default_branch", "")).strip()
+        if not branch:
+            raise GitHubApiError("GitHub 저장소의 기본 브랜치를 찾지 못했습니다.")
+        return branch
 
     async def get_latest_commit(
         self,
@@ -90,6 +137,7 @@ class GitHubClient:
                 or "unknown"
             ),
             committed_at=str(data.get("commit", {}).get("author", {}).get("date") or ""),
+            author_email=str(data.get("commit", {}).get("author", {}).get("email") or ""),
         )
 
     async def compare_commits(
@@ -119,6 +167,7 @@ class GitHubClient:
                         or commit.get("commit", {}).get("author", {}).get("name")
                         or "unknown"
                     ),
+                    author_email=str(commit.get("commit", {}).get("author", {}).get("email") or ""),
                 )
                 for commit in data.get("commits", [])
             ),

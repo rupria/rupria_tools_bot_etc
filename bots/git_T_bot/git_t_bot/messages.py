@@ -168,10 +168,9 @@ def build_help_text(prefix: str) -> str:
             f"{prefix}watch remove owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]",
             f"{prefix}watch check",
             f"{prefix}watch test [#channel]",
-            "/github_watches repository:* branch:* user:*",
-            "/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate",
-            "/github_watch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
-            "/github_unwatch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
+            "/github_watch repository:https://github.com/owner/repo users:rupria,teammate",
+            "/github_unwatch repository:https://github.com/owner/repo",
+            "/github_watches",
         ]
     )
 

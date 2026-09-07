@@ -72,5 +72,6 @@ def parse_push_payload(payload: object) -> PushInfo | None:
                 or "unknown"
             ),
             committed_at=str(head_commit.get("timestamp", "")),
+            author_email=str(author_data.get("email", "")),
         ),
     )

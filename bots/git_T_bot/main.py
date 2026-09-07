@@ -17,11 +17,12 @@ from git_t_bot.config import (
     create_watch_key,
     dedupe_watches,
     load_settings,
+    normalize_repository,
     normalize_branch_targets,
     normalize_repository_targets,
     normalize_user_targets,
 )
-from git_t_bot.github_client import CommitInfo, CompareInfo, GitHubClient
+from git_t_bot.github_client import CommitInfo, CompareInfo, GitHubApiError, GitHubClient
 from git_t_bot.messages import (
     build_branch_list_text,
     build_commit_embed,
@@ -65,7 +66,8 @@ async def close_http_session() -> None:
 
 class GitTBot(commands.Bot):
     async def setup_hook(self) -> None:
-        await start_webhook_server()
+        if settings.webhook_secret:
+            await start_webhook_server()
 
     async def close(self) -> None:
         await close_webhook_server()
@@ -261,8 +263,15 @@ def should_send_alert(watch: WatchTarget, latest_commit, compare_info) -> bool:
     if watch.user == "*":
         return True
     if compare_info and compare_info.commits:
-        return any(author_matches_filter(commit.author_name, watch.user) for commit in compare_info.commits)
-    return author_matches_filter(latest_commit.author_name, watch.user)
+        return any(
+            author_matches_filter(commit.author_name, watch.user)
+            or author_matches_filter(commit.author_email, watch.user)
+            for commit in compare_info.commits
+        )
+    return author_matches_filter(latest_commit.author_name, watch.user) or author_matches_filter(
+        latest_commit.author_email,
+        watch.user,
+    )
 
 
 async def reply_interaction(
@@ -568,7 +577,10 @@ async def bootstrap_watches(watches: list[WatchTarget]) -> dict[str, str]:
 
 async def announce_watch_error(watch: WatchTarget, error: Exception) -> None:
     key = create_watch_key(watch)
-    message = f"{watch.repository}@{watch.branch}: {error}"
+    if isinstance(error, GitHubApiError) and error.status in {403, 429}:
+        message = f"{watch.repository}@{watch.branch}: rate-limit-{error.status}"
+    else:
+        message = f"{watch.repository}@{watch.branch}: {error}"
     if last_admin_errors.get(key) == message:
         return
     last_admin_errors[key] = message
@@ -616,9 +628,24 @@ async def poll_watches() -> dict[str, int | bool]:
     }
     try:
         session = await get_session()
+        latest_cache: dict[tuple[str, str], CommitInfo | Exception] = {}
+        compare_cache: dict[tuple[str, str, str], CompareInfo | None] = {}
         for watch in get_all_watches():
             try:
-                latest_commit = await github.get_latest_commit(session, watch.repository, watch.branch)
+                branch_key = (watch.repository.lower(), watch.branch.lower())
+                if branch_key not in latest_cache:
+                    try:
+                        latest_cache[branch_key] = await github.get_latest_commit(
+                            session,
+                            watch.repository,
+                            watch.branch,
+                        )
+                    except Exception as error:
+                        latest_cache[branch_key] = error
+                cached_latest = latest_cache[branch_key]
+                if isinstance(cached_latest, Exception):
+                    raise cached_latest
+                latest_commit = cached_latest
                 previous_sha = str(
                     runtime_state["branches"].get(create_watch_key(watch), {}).get("last_seen_sha", "")
                 )
@@ -629,7 +656,14 @@ async def poll_watches() -> dict[str, int | bool]:
                     continue
 
                 if previous_sha != latest_commit.sha:
-                    compare_info = await get_compare_info(watch.repository, previous_sha, latest_commit.sha)
+                    compare_key = (watch.repository.lower(), previous_sha, latest_commit.sha)
+                    if compare_key not in compare_cache:
+                        compare_cache[compare_key] = await get_compare_info(
+                            watch.repository,
+                            previous_sha,
+                            latest_commit.sha,
+                        )
+                    compare_info = compare_cache[compare_key]
                     if await send_commit_alert(watch, previous_sha, latest_commit, compare_info):
                         result["changed_count"] += 1
 
@@ -867,197 +901,124 @@ async def watch_test(
     await reply(ctx, f"테스트 알림을 <#{target_channel.id}> 채널로 전송했습니다.")
 
 
-@bot.tree.command(name="github_watches", description="현재 감시 설정을 조회합니다.")
-@app_commands.describe(
-    repository="owner/repo 형식 또는 *. 여러 개는 쉼표로 구분합니다.",
-    branch="브랜치명 또는 *. 여러 개는 쉼표로 구분합니다.",
-    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
-)
-async def github_watches_command(
-    interaction: discord.Interaction,
-    repository: str = "*",
-    branch: str = "*",
-    user: str = "*",
-) -> None:
+@bot.tree.command(name="github_watches", description="현재 채널에서 감시 중인 GitHub 저장소를 확인합니다.")
+async def github_watches_command(interaction: discord.Interaction) -> None:
     if not is_interaction_authorized(interaction):
         await reply_interaction(interaction, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
         return
 
-    try:
-        normalized_repositories = normalize_repository_filters(repository)
-        normalized_branches = normalize_branch_filters(branch)
-        normalized_users = normalize_user_filters(user)
-    except ValueError as error:
-        await reply_interaction(interaction, str(error))
+    channel_id = str(interaction.channel_id or "")
+    watches = [watch for watch in get_visible_watches(interaction.guild) if watch.channel_id == channel_id]
+    if not watches:
+        await reply_interaction(interaction, "현재 채널에 등록된 저장소가 없습니다.")
         return
 
-    watches = filter_watches(
-        get_visible_watches(interaction.guild),
-        normalized_repositories,
-        normalized_branches,
-        normalized_users,
-    )
-    await reply_interaction(
-        interaction,
-        build_list_text(watches, normalized_repositories, normalized_branches, normalized_users),
-    )
-
-
-@bot.tree.command(name="github_branches", description="저장소의 GitHub 브랜치와 감시 연결 상태를 조회합니다.")
-@app_commands.describe(
-    repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
-    branch="브랜치명 또는 *. 여러 개는 쉼표로 구분합니다.",
-    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
-)
-async def github_branches_command(
-    interaction: discord.Interaction,
-    repository: str,
-    branch: str = "*",
-    user: str = "*",
-) -> None:
-    if not is_interaction_authorized(interaction):
-        await reply_interaction(interaction, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
-        return
-
-    try:
-        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
-        normalized_branches = normalize_branch_filters(branch)
-        normalized_users = normalize_user_filters(user)
-    except ValueError as error:
-        await reply_interaction(interaction, str(error))
-        return
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        text = await build_repository_branch_catalogs(
-            normalized_repositories,
-            normalized_branches,
-            normalized_users,
-            get_visible_watches(interaction.guild),
-        )
-    except Exception as error:
-        await reply_interaction(interaction, str(error))
-        return
-
-    await reply_interaction(interaction, text)
+    repositories: dict[str, list[str]] = {}
+    for watch in watches:
+        users = repositories.setdefault(watch.repository, [])
+        if watch.user not in users:
+            users.append(watch.user)
+    lines = [f"• `{repository}` — {', '.join(users)}" for repository, users in repositories.items()]
+    await reply_interaction(interaction, "\n".join(lines))
 
 
 @bot.tree.command(name="github_watch", description="GitHub 저장소의 push 알림을 현재 채널에 등록합니다.")
 @app_commands.describe(
-    repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
-    branch="실제 감시할 브랜치명. 여러 개는 쉼표로 구분합니다.",
-    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
-    channel="비워두면 현재 채널을 사용합니다.",
+    repository="GitHub 저장소 링크(.git 링크도 가능)",
+    users="알림을 받을 GitHub ID 또는 커밋 이메일. 여러 명은 쉼표로 구분, 전체는 *",
 )
 async def github_watch_command(
     interaction: discord.Interaction,
     repository: str,
-    branch: str,
-    user: str = "*",
-    channel: discord.TextChannel | None = None,
+    users: str,
 ) -> None:
     global saved_watches
     if not is_interaction_authorized(interaction):
         await reply_interaction(interaction, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
         return
 
-    if channel is None and not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+    if interaction.channel_id is None or not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
         await reply_interaction(interaction, "텍스트 채널 또는 스레드에서만 감시를 등록할 수 있습니다.")
         return
 
-    try:
-        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
-        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
-        normalized_users = normalize_user_filters(user)
-    except ValueError as error:
-        await reply_interaction(interaction, str(error))
-        return
-
-    target_channel = channel or interaction.channel
-    if not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
-        await reply_interaction(interaction, "텍스트 채널 또는 스레드만 감시 채널로 사용할 수 있습니다.")
-        return
-
-    requested_watches = build_watch_targets(
-        normalized_repositories,
-        normalized_branches,
-        normalized_users,
-        str(target_channel.id),
-    )
-    existing_keys = {create_watch_key(item) for item in get_all_watches()}
-    existing_watches = [watch for watch in requested_watches if create_watch_key(watch) in existing_keys]
-    new_watches = [watch for watch in requested_watches if create_watch_key(watch) not in existing_keys]
-
     await interaction.response.defer(ephemeral=True, thinking=True)
-    if not new_watches:
-        await reply_interaction(interaction, build_watch_batch_added_text([], {}, existing_watches))
+    try:
+        normalized_repository = normalize_repository(repository)
+        normalized_users = normalize_user_targets(re.sub(r"\s+", ",", users))
+        session = await get_session()
+        default_branch = await github.get_default_branch(session, normalized_repository)
+        requested_watches = build_watch_targets(
+            (normalized_repository,),
+            (default_branch,),
+            normalized_users,
+            str(interaction.channel_id),
+        )
+        replaced_watches = [
+            watch
+            for watch in saved_watches
+            if watch.repository.lower() == normalized_repository.lower()
+            and watch.channel_id == str(interaction.channel_id)
+        ]
+        await bootstrap_watches(requested_watches)
+    except (ValueError, RuntimeError) as error:
+        await reply_interaction(interaction, f"등록 실패: {error}")
         return
 
-    latest_shas = await bootstrap_watches(new_watches)
-    saved_watches = dedupe_watches([*saved_watches, *new_watches])
+    replaced_keys = {create_watch_key(watch) for watch in replaced_watches}
+    requested_keys = {create_watch_key(watch) for watch in requested_watches}
+    saved_watches = dedupe_watches(
+        [watch for watch in saved_watches if create_watch_key(watch) not in replaced_keys]
+        + requested_watches
+    )
+    for watch in replaced_watches:
+        key = create_watch_key(watch)
+        if key not in requested_keys:
+            runtime_state["branches"].pop(key, None)
     save_persisted_watches(settings.watch_file, saved_watches)
-    await reply_interaction(interaction, build_watch_batch_added_text(new_watches, latest_shas, existing_watches))
+    save_runtime_state(settings.state_file, runtime_state)
+    await reply_interaction(
+        interaction,
+        f"등록 완료: `{normalized_repository}`\n"
+        f"감시 사용자: `{', '.join(normalized_users)}`\n"
+        "이후 발생하는 push부터 이 채널에 알림이 전송됩니다.",
+    )
 
 
 @bot.tree.command(name="github_unwatch", description="현재 채널에서 GitHub 저장소 감시를 해제합니다.")
-@app_commands.describe(
-    repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
-    branch="제거할 브랜치명. 여러 개는 쉼표로 구분합니다.",
-    user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
-    channel="비워두면 현재 채널을 사용합니다.",
-)
+@app_commands.describe(repository="감시를 해제할 GitHub 저장소 링크")
 async def github_unwatch_command(
     interaction: discord.Interaction,
     repository: str,
-    branch: str,
-    user: str = "*",
-    channel: discord.TextChannel | None = None,
 ) -> None:
     global saved_watches
     if not is_interaction_authorized(interaction):
         await reply_interaction(interaction, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
         return
 
-    if channel is None and not isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
-        await reply_interaction(interaction, "텍스트 채널 또는 스레드에서만 감시를 제거할 수 있습니다.")
-        return
-
     try:
-        normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
-        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
-        normalized_users = normalize_user_filters(user)
+        normalized_repository = normalize_repository(repository)
     except ValueError as error:
-        await reply_interaction(interaction, str(error))
+        await reply_interaction(interaction, f"해제 실패: {error}")
         return
 
-    target_channel = channel or interaction.channel
-    if not isinstance(target_channel, (discord.TextChannel, discord.Thread)):
-        await reply_interaction(interaction, "텍스트 채널 또는 스레드만 감시 채널로 사용할 수 있습니다.")
-        return
-
-    requested_watches = build_watch_targets(
-        normalized_repositories,
-        normalized_branches,
-        normalized_users,
-        str(target_channel.id),
-    )
-    startup_keys = {create_watch_key(item) for item in settings.startup_watches}
-    saved_keys = {create_watch_key(item) for item in saved_watches}
-    locked_watches = [watch for watch in requested_watches if create_watch_key(watch) in startup_keys]
-    removed_watches = [watch for watch in requested_watches if create_watch_key(watch) in saved_keys]
-    missing_watches = [
+    channel_id = str(interaction.channel_id or "")
+    removed_watches = [
         watch
-        for watch in requested_watches
-        if create_watch_key(watch) not in startup_keys and create_watch_key(watch) not in saved_keys
+        for watch in saved_watches
+        if watch.repository.lower() == normalized_repository.lower() and watch.channel_id == channel_id
     ]
-
     removed_keys = {create_watch_key(watch) for watch in removed_watches}
     saved_watches = [item for item in saved_watches if create_watch_key(item) not in removed_keys]
     for watch in removed_watches:
         runtime_state["branches"].pop(create_watch_key(watch), None)
     save_persisted_watches(settings.watch_file, saved_watches)
     save_runtime_state(settings.state_file, runtime_state)
-    await reply_interaction(interaction, build_watch_batch_removed_text(removed_watches, missing_watches, locked_watches))
+    message = (
+        f"감시 해제: `{normalized_repository}`"
+        if removed_watches
+        else f"현재 채널에 등록되지 않은 저장소입니다: `{normalized_repository}`"
+    )
+    await reply_interaction(interaction, message)
 
 
 @watch_group.error

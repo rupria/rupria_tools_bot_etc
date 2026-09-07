@@ -5,9 +5,6 @@ memory: 256
 cpu: 25
 disk: 512
 env:
-  PORT: "8080"
-  WEBHOOK_HOST: "0.0.0.0"
-  GITHUB_WEBHOOK_PATH: "/github/webhook"
   POLLING_ENABLED: "true"
   WATCH_POLL_INTERVAL_MS: "20000"
   PY_PACKAGES: "discord.py aiohttp python-dotenv"

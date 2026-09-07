@@ -111,7 +111,7 @@ class MessageTests(unittest.TestCase):
     def test_build_help_text(self) -> None:
         text = build_help_text("!")
         self.assertIn("!watch add owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]", text)
-        self.assertIn("/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate", text)
+        self.assertIn("/github_watch repository:https://github.com/owner/repo users:rupria,teammate", text)
 
     def test_build_startup_text(self) -> None:
         text = build_startup_text(

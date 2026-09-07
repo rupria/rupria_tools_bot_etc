@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
+os.environ.setdefault("GITHUB_TOKEN", "test-token")
 bot_main = importlib.import_module("main")
 
 
@@ -63,6 +64,20 @@ class DummyInteraction:
 
 
 class AuthorizationTests(unittest.TestCase):
+    def test_legacy_slash_command_shape_is_preserved(self) -> None:
+        commands = {
+            command.name: [parameter.name for parameter in command.parameters]
+            for command in bot_main.bot.tree.get_commands()
+        }
+        self.assertEqual(
+            commands,
+            {
+                "github_watches": [],
+                "github_watch": ["repository", "users"],
+                "github_unwatch": ["repository"],
+            },
+        )
+
     def setUp(self) -> None:
         self.original_settings = bot_main.settings
         bot_main.settings = replace(
