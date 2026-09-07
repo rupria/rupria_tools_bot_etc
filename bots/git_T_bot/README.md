@@ -1,6 +1,6 @@
 # git_T_bot
 
-이 봇은 GitHub 저장소에서 `push` 웹훅을 받으면 등록된 Discord 채널에 알림을 보낸다. GitHub API를 수시로 조회하지 않으므로 상시 polling에서 발생하던 403 요청 제한을 피할 수 있다.
+이 봇은 GitHub 저장소와 브랜치를 20초마다 확인해 새 커밋을 등록된 Discord 채널에 알린다. Dishost 무료 플랜에서는 외부 웹훅 주소가 제공되지 않으므로 polling을 기본으로 사용하며, 공개 주소가 있는 환경에서는 `push` 웹훅으로도 동작한다.
 
 ## 하는 일
 
@@ -54,8 +54,8 @@
 - `GITHUB_WEBHOOK_PATH`: 웹훅 수신 경로. 기본값 `/github/webhook`
 - `PORT`: Dishost가 연결할 HTTP 포트. 기본값 `8080`
 - `WEBHOOK_HOST`: 기본값 `0.0.0.0`
-- `POLLING_ENABLED`: 주기 조회 비상 대체 기능. 기본값 `false`
-- `WATCH_POLL_INTERVAL_MS`: `POLLING_ENABLED=true`일 때만 사용하는 조회 주기. 기본값 `60000`
+- `POLLING_ENABLED`: 주기 조회 사용 여부. Dishost 무료 플랜 기본값 `true`
+- `WATCH_POLL_INTERVAL_MS`: 조회 주기. 기본값 `20000`(20초)
 - `WATCH_TARGETS`: 시작할 때 미리 붙일 감시 목록. `owner/repo|branch|channel_id` 또는 `owner/repo|branch|channel_id|user` 형식
 - `COMMAND_PREFIX`: 기본값 `!`이고 실제 명령은 `!watch ...`
 - `STARTUP_NOTIFY`: 시작 시 관리 채널에 상태 알림 전송 여부
@@ -91,7 +91,7 @@ GitHub의 `ping` 요청이 HTTP 200을 받으면 연결된 것이다. `/health`�
 2. 브랜치 `main` 선택
 3. 시작 파일을 `bots/git_T_bot/main.py`로 설정
 4. Python 패키지에 `discord.py aiohttp python-dotenv` 입력
-5. 환경 변수에 `DISCORD_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `PORT=8080`, `POLLING_ENABLED=false` 입력
+5. 무료 플랜은 환경 변수에 `DISCORD_BOT_TOKEN`, `GITHUB_TOKEN`, `POLLING_ENABLED=true`, `WATCH_POLL_INTERVAL_MS=20000` 입력
 6. Push 시 자동 배포 활성화
 
 ## 완료 알림 기준

@@ -8,8 +8,8 @@ env:
   PORT: "8080"
   WEBHOOK_HOST: "0.0.0.0"
   GITHUB_WEBHOOK_PATH: "/github/webhook"
-  POLLING_ENABLED: "false"
-  WATCH_POLL_INTERVAL_MS: "60000"
+  POLLING_ENABLED: "true"
+  WATCH_POLL_INTERVAL_MS: "20000"
   PY_PACKAGES: "discord.py aiohttp python-dotenv"
 git:
   autoDeploy: true
