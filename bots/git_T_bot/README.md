@@ -125,3 +125,15 @@ python main.py
 5. 실제 감시 개수는 Dishost 내부 `data/watchers.json`에서 확인합니다. 이 파일은 Git에서 제외됩니다.
 
 참고: [GitHub REST API rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
+
+
+
+
+### 시연 이미지
+--- 
+### 채팅알람
+<img width="524" height="808" alt="{4220283D-894B-4419-B392-8535437F1419}" src="https://github.com/user-attachments/assets/66c0fc7d-3a01-4180-b1b4-a6a8a8a79576" />
+
+
+### 명령어 사용
+<img width="1243" height="389" alt="{52061894-9F9A-490F-AFE7-256ED43376D5}" src="https://github.com/user-attachments/assets/369d0be9-5410-4166-9c2b-ca4592a574f0" />
