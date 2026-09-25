@@ -11,7 +11,6 @@ from git_t_bot.messages import (
     build_commit_embed,
     build_help_text,
     build_list_text,
-    build_poll_summary_text,
     build_repository_branch_catalog_text,
     build_startup_text,
     build_watch_added_text,
@@ -116,22 +115,8 @@ class MessageTests(unittest.TestCase):
     def test_build_startup_text(self) -> None:
         text = build_startup_text(
             [WatchTarget("rupria/rupria_tools_bot_etc", "main", "12345678901234567")],
-            120000,
         )
         self.assertEqual(text, "git_T_bot 실행됨")
-
-    def test_build_poll_summary_text(self) -> None:
-        text = build_poll_summary_text(
-            {
-                "skipped": False,
-                "watch_count": 3,
-                "initialized_count": 1,
-                "changed_count": 2,
-                "error_count": 0,
-            }
-        )
-        self.assertIn("감시 대상: 3개", text)
-        self.assertIn("새 알림: 2개", text)
 
     def test_build_watch_batch_added_text(self) -> None:
         watch = WatchTarget("rupria/gitproject", "main", "12345678901234567", user="*")
@@ -142,6 +127,11 @@ class MessageTests(unittest.TestCase):
         )
         self.assertIn("감시를 추가했습니다.", text)
         self.assertIn("기준 SHA: abcdef1", text)
+
+    def test_build_watch_batch_added_text_without_api_bootstrap(self) -> None:
+        watch = WatchTarget("rupria/gitproject", "dev", "12345678901234567", user="*")
+        text = build_watch_batch_added_text([watch], {}, [])
+        self.assertIn("웹훅 상태: 수신 대기", text)
 
     def test_build_watch_batch_removed_text(self) -> None:
         removed = [WatchTarget("rupria/gitproject", "main", "12345678901234567", user="*")]

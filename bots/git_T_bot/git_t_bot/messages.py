@@ -71,6 +71,9 @@ def build_author_summary(latest_commit: CommitInfo, compare_info: CompareInfo | 
 
 def format_changed_file_line(changed_file: ChangedFileInfo) -> str:
     file_name = truncate(changed_file.filename, 72)
+    if changed_file.additions is None or changed_file.deletions is None:
+        status_labels = {"added": "추가", "removed": "삭제", "modified": "수정"}
+        return f"`{file_name}` ({status_labels.get(changed_file.status, '변경')})"
     return f"`{file_name}` +{changed_file.additions} / -{changed_file.deletions}"
 
 
@@ -142,8 +145,9 @@ def build_commit_embed(
         value=build_author_summary(latest_commit, compare_info),
         inline=False,
     )
+    has_line_counts = bool(compare_info and any(item.additions is not None for item in compare_info.files))
     embed.add_field(
-        name="변경 파일 · 줄 수",
+        name="변경 파일 · 줄 수" if has_line_counts else "변경 파일",
         value="\n".join(build_file_summary_lines(compare_info)),
         inline=False,
     )
@@ -154,7 +158,7 @@ def build_commit_embed(
     )
     if latest_commit.committed_at:
         embed.timestamp = discord.utils.parse_time(latest_commit.committed_at)
-    embed.set_footer(text="중앙 GitHub 감시 봇. 대상 저장소 설치 불필요")
+    embed.set_footer(text="GitHub 웹훅 기반 중앙 감시 봇")
     return embed
 
 
@@ -168,6 +172,8 @@ def build_help_text(prefix: str) -> str:
             f"{prefix}watch remove owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]",
             f"{prefix}watch check",
             f"{prefix}watch test [#channel]",
+            "/github_webhook_setup repository:owner/repo",
+            "/github_status",
             "/github_watches repository:* branch:* user:*",
             "/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate",
             "/github_watch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
@@ -277,21 +283,20 @@ def build_repository_branch_catalog_text(
     return "\n".join(lines)
 
 
-def build_startup_text(watches: list[WatchTarget], poll_interval_ms: int) -> str:
+def build_startup_text(_watches: list[WatchTarget]) -> str:
     return "git_T_bot 실행됨"
 
 
-def build_watch_added_text(watch: WatchTarget, latest_sha: str) -> str:
-    return "\n".join(
-        [
-            "감시를 추가했습니다.",
-            f"레포지토리 : {watch.repository}",
-            f"브랜치 : {watch.branch}",
-            f"감지 사용자 : {format_watch_user(watch.user)}",
-            f"채널 : <#{watch.channel_id}>",
-            f"기준 SHA: {short_sha(latest_sha)}",
-        ]
-    )
+def build_watch_added_text(watch: WatchTarget, latest_sha: str = "") -> str:
+    lines = [
+        "감시를 추가했습니다.",
+        f"레포지토리 : {watch.repository}",
+        f"브랜치 : {watch.branch}",
+        f"감지 사용자 : {format_watch_user(watch.user)}",
+        f"채널 : <#{watch.channel_id}>",
+    ]
+    lines.append(f"기준 SHA: {short_sha(latest_sha)}" if latest_sha else "웹훅 상태: 수신 대기")
+    return "\n".join(lines)
 
 
 def build_watch_removed_text(watch: WatchTarget) -> str:
@@ -313,7 +318,7 @@ def build_watch_batch_added_text(
 ) -> str:
     if len(added_watches) == 1 and not existing_watches:
         watch = added_watches[0]
-        return build_watch_added_text(watch, latest_shas[create_watch_key(watch)])
+        return build_watch_added_text(watch, latest_shas.get(create_watch_key(watch), ""))
 
     lines = [
         "감시 추가를 완료했습니다.",
@@ -371,15 +376,24 @@ def build_watch_batch_removed_text(
     return "\n".join(lines)
 
 
-def build_poll_summary_text(result: dict[str, int | bool]) -> str:
-    if result.get("skipped"):
-        return "이미 점검이 진행 중이라 이번 요청은 건너뛰었습니다."
-    return "\n".join(
-        [
-            "점검 완료",
-            f"감시 대상: {result['watch_count']}개",
-            f"초기화: {result['initialized_count']}개",
-            f"새 알림: {result['changed_count']}개",
-            f"오류: {result['error_count']}개",
-        ]
+def build_webhook_status_text(
+    watches: list[WatchTarget],
+    *,
+    secret_configured: bool,
+    endpoint: str,
+    queue_size: int,
+    webhook_states: dict,
+) -> str:
+    connected_repositories = sum(
+        1 for state in webhook_states.values() if isinstance(state, dict) and state.get("last_received_at")
     )
+    lines = [
+        "GitHub 웹훅 상태",
+        f"수신 서버: {'정상' if secret_configured else '비밀키 설정 필요'}",
+        f"감시 대상: {len(watches)}개",
+        f"수신 확인 저장소: {connected_repositories}개",
+        f"처리 대기: {queue_size}개",
+    ]
+    if endpoint:
+        lines.append(f"Payload URL: {endpoint}")
+    return "\n".join(lines)

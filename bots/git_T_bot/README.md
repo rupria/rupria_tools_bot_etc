@@ -1,8 +1,8 @@
 # git_T_bot
 
-이 봇은 GitHub 저장소와 브랜치를 감시하다가 새 커밋이 올라오면 Discord 채널에 알림을 보냅니다.
+이 봇은 GitHub `push` 웹훅을 받아 저장소·브랜치·사용자 조건에 맞는 커밋 알림을 Discord 채널로 보냅니다.
 
-`작업 완료`를 GitHub 브랜치 업데이트로 판단하는 구조이므로, Dishost와 같은 일반적인 Discord 봇 호스팅 환경에서도 사용할 수 있습니다.
+20초 polling은 사용하지 않습니다. 상시 실행되는 공개 HTTPS 웹 서비스에서 GitHub가 전달한 이벤트를 바로 처리합니다.
 
 ## 하는 일
 
@@ -10,6 +10,8 @@
 - 브랜치별 구분
 - 사용자별 감지 필터
 - 채널별 알림 분리
+- GitHub API polling 없이 실시간 push 수신
+- 저장소별 웹훅 서명 검증과 중복 전송 방지
 - 재시작 후에도 감시 대상 유지
 - `main`, `dev`, `release` 등의 브랜치를 각각 따로 감시
 
@@ -29,6 +31,8 @@
 !watch check
 !watch test
 
+/github_webhook_setup repository:owner/repo
+/github_status
 /github_watches repository:* branch:* user:*
 /github_branches repository:owner/repo,owner/repo2 branch:main,test user:rupria,teammate
 /github_watch repository:owner/repo,owner/repo2 branch:main,test user:rupria,teammate channel:#alerts
@@ -47,6 +51,11 @@
 - `DISCORD_ALLOWED_ROLE_IDS`를 설정하면 해당 역할만 명령을 사용할 수 있습니다.
 - `DISCORD_ADMIN_CHANNEL_ID`를 설정하면 지정한 채널에서만 명령을 받습니다.
 - Discord 서버 관리자 권한이 있으면 서버·채널·역할 제한 없이 바로 사용할 수 있습니다.
+- 저장소 관리자는 저장소마다 웹훅을 한 번 설치해야 합니다.
+- `/github_webhook_setup` 결과는 본인에게만 표시되며, 출력된 Secret은 외부에 공유하지 않습니다.
+- Payload URL과 Secret은 Discord 서버별로 분리되며, 해당 서버의 채널 구독에만 알림을 전달합니다.
+- `/github_watch`는 API 조회 없이 구독을 저장하므로 웹훅 설치 전에도 등록할 수 있습니다.
+- `branch:*`로 등록하면 해당 저장소의 모든 브랜치 push를 감지합니다.
 
 ## 환경 변수
 
@@ -56,8 +65,12 @@
 | `DISCORD_GUILD_ID` | 사용할 서버 ID |
 | `DISCORD_ADMIN_CHANNEL_ID` | 관리 명령을 받을 채널 ID |
 | `DISCORD_ALLOWED_ROLE_IDS` | 쉼표로 구분한 관리 역할 ID |
-| `GITHUB_TOKEN` | GitHub API 토큰. 비공개 저장소 또는 잦은 polling 사용 시 권장 |
-| `WATCH_POLL_INTERVAL_MS` | 감시 주기. 기본값 `20000`(20초) |
+| `GITHUB_TOKEN` | 선택값. `/github_branches` 등 GitHub 조회 명령에만 사용 |
+| `GITHUB_WEBHOOK_MASTER_SECRET` | 저장소별 웹훅 Secret을 파생하는 서버 비밀키 |
+| `GITHUB_WEBHOOK_PUBLIC_URL` | 외부에서 접근 가능한 서비스의 HTTPS 주소 |
+| `GITHUB_WEBHOOK_PATH` | 웹훅 수신 경로. 기본값 `/webhooks/github` |
+| `WEBHOOK_HOST` | 수신 주소. 기본값 `0.0.0.0` |
+| `PORT` 또는 `WEBHOOK_PORT` | 웹 서버 포트. 기본값 `8080` |
 | `WATCH_TARGETS` | 시작할 때 미리 등록할 감시 목록 |
 | `COMMAND_PREFIX` | 명령어 접두사. 기본값 `!` |
 | `STARTUP_NOTIFY` | 시작 시 관리 채널에 상태 알림을 보낼지 여부 |
@@ -79,6 +92,18 @@ python -m pip install discord.py aiohttp python-dotenv
 python main.py
 ```
 
+실행 후 `http://localhost:8080/health`에서 수신 서버 상태를 확인할 수 있습니다. 로컬에서 실제 GitHub 웹훅을 받으려면 HTTPS 터널 또는 공개 프록시가 필요합니다.
+
+## GitHub 웹훅 등록
+
+1. Discord에서 `/github_webhook_setup repository:owner/repo`를 실행합니다.
+2. 저장소의 `Settings > Webhooks > Add webhook`으로 이동합니다.
+3. 명령에서 받은 Payload URL과 Secret을 입력합니다.
+   - 명령이 출력한 URL은 완성된 주소이므로 끝에 `/github`를 추가하지 않습니다.
+4. Content type은 `application/json`, 이벤트는 `Just the push event`, SSL 검증은 활성화합니다.
+5. GitHub의 ping이 성공하면 `/github_status`의 수신 확인 저장소 수가 증가합니다.
+6. `/github_watch`로 브랜치·사용자·채널 구독을 추가합니다.
+
 ## Dishost 배포
 
 2026년 8월 27일 기준, 현재 연결된 Dishost 서비스 화면에서는 Python 이미지를 사용하고 `GIT_ADDRESS`, `BRANCH`, `STARTUP_FILE`, `PY_PACKAGES`를 시작 설정에서 받습니다. 따라서 이 봇도 Python 기준으로 구성되어 있습니다.
@@ -86,15 +111,18 @@ python main.py
 권장 순서:
 
 1. Dishost 서비스에서 GitHub 저장소 `rupria/rupria_tools_bot_etc`를 연결합니다.
-2. 브랜치 `main`을 선택합니다.
+2. 개발 검증 중에는 브랜치 `dev`를 선택합니다.
 3. 시작 파일을 `bots/git_T_bot/main.py`로 설정합니다.
 4. Python 패키지에 `discord.py aiohttp python-dotenv`를 입력합니다.
 5. 환경 변수를 입력합니다.
-6. Push 시 자동 배포를 활성화합니다.
+6. 공개 HTTPS 주소를 `GITHUB_WEBHOOK_PUBLIC_URL`에 입력합니다.
+7. Push 시 자동 배포를 활성화합니다.
 
 ## 완료 알림 기준
 
-이 버전은 로컬 Codex 세션을 읽지 않습니다. 대신 감시 중인 브랜치의 HEAD가 변경되면 해당 커밋을 작업 완료 신호로 판단하여 알림을 보냅니다.
+이 버전은 로컬 Codex 세션을 읽지 않습니다. GitHub가 전달한 `push` 이벤트를 작업 완료 신호로 판단하여 알림을 보냅니다.
+
+개발 브랜치의 변경 기록은 [Update_His.md](./Update_His.md)에서 날짜별로 관리합니다.
 
 ## 운영 히스토리
 
