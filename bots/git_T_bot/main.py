@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+import json
 import logging
 from pathlib import Path
 import re
+import time
 
 import aiohttp
+from aiohttp import web
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 from git_t_bot.config import (
     WatchTarget,
@@ -24,9 +29,9 @@ from git_t_bot.messages import (
     build_commit_embed,
     build_help_text,
     build_list_text,
-    build_poll_summary_text,
     build_repository_branch_catalog_text,
     build_startup_text,
+    build_webhook_status_text,
     build_watch_batch_added_text,
     build_watch_batch_removed_text,
 )
@@ -36,6 +41,13 @@ from git_t_bot.storage import (
     load_runtime_state,
     save_persisted_watches,
     save_runtime_state,
+)
+from git_t_bot.webhook import (
+    PushEvent,
+    derive_repository_secret,
+    parse_push_event,
+    repository_from_payload,
+    verify_webhook_signature,
 )
 
 
@@ -60,7 +72,12 @@ async def close_http_session() -> None:
 
 
 class GitTBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        await start_webhook_server()
+        start_webhook_worker()
+
     async def close(self) -> None:
+        await stop_webhook_server()
         await close_http_session()
         await super().close()
 
@@ -70,9 +87,13 @@ github = GitHubClient(settings.github_token)
 saved_watches = load_persisted_watches(settings.watch_file)
 runtime_state = load_runtime_state(settings.state_file)
 last_admin_errors: dict[str, str] = {}
-poll_in_flight = False
 http_session: aiohttp.ClientSession | None = None
+webhook_runner: web.AppRunner | None = None
+webhook_worker_task: asyncio.Task[None] | None = None
+webhook_queue: asyncio.Queue[tuple[str, str, PushEvent]] | None = None
+queued_delivery_ids: set[str] = set()
 CHANNEL_MENTION_PATTERN = re.compile(r"^<#(\d{17,20})>$")
+MAX_COMPLETED_DELIVERIES = 1000
 
 
 def get_all_watches() -> list[WatchTarget]:
@@ -288,7 +309,8 @@ async def build_repository_branch_catalog(
         for branch_info in sorted(branches, key=lambda item: item.name.lower())
         if branch_names is None or branch_info.name.lower() in branch_names
     )
-    matching_watches = filter_watches(visible_watches or get_all_watches(), (repository,), branch_filters, user_filters)
+    source_watches = get_all_watches() if visible_watches is None else visible_watches
+    matching_watches = filter_watches(source_watches, (repository,), branch_filters, user_filters)
     if not filtered_branches:
         return "\n".join(
             [
@@ -363,107 +385,238 @@ async def get_session() -> aiohttp.ClientSession:
     return http_session
 
 
-async def bootstrap_watches(watches: list[WatchTarget]) -> dict[str, str]:
-    session = await get_session()
-    cached_heads: dict[tuple[str, str], str] = {}
-    latest_shas: dict[str, str] = {}
-    for watch in watches:
-        branch_key = (watch.repository.lower(), watch.branch.lower())
-        latest_sha = cached_heads.get(branch_key)
-        if latest_sha is None:
-            latest_commit = await github.get_latest_commit(session, watch.repository, watch.branch)
-            latest_sha = latest_commit.sha
-            cached_heads[branch_key] = latest_sha
-        set_head_state(watch, latest_sha)
-        latest_shas[create_watch_key(watch)] = latest_sha
-    save_runtime_state(settings.state_file, runtime_state)
-    return latest_shas
+def get_webhook_endpoint(guild_id: str = "") -> str:
+    if not settings.webhook_public_url:
+        return ""
+    if settings.webhook_public_url.endswith(settings.webhook_path):
+        endpoint = settings.webhook_public_url
+    else:
+        endpoint = f"{settings.webhook_public_url}{settings.webhook_path}"
+    return f"{endpoint}/{guild_id}" if guild_id else endpoint
 
 
-async def announce_watch_error(watch: WatchTarget, error: Exception) -> None:
-    key = create_watch_key(watch)
-    message = f"{watch.repository}@{watch.branch}: {error}"
-    if last_admin_errors.get(key) == message:
-        return
-    last_admin_errors[key] = message
-    await send_admin_notice(f"GitHub 감시 오류\n{watch.repository} @ {watch.branch}\n{error}")
+def get_webhook_states_for_guild(guild: discord.Guild | None) -> dict:
+    if guild is None:
+        return {}
+    prefix = f"{guild.id}:"
+    return {
+        key: value
+        for key, value in runtime_state.get("webhooks", {}).items()
+        if str(key).startswith(prefix)
+    }
 
 
-async def send_commit_alert(watch: WatchTarget, previous_sha: str, latest_commit) -> bool:
+def watch_matches_push(watch: WatchTarget, event: PushEvent) -> bool:
+    if watch.repository.lower() != event.repository.lower():
+        return False
+    if watch.branch == "*":
+        return True
+    return watch.branch.lower() == event.branch.lower()
+
+
+async def resolve_watch_channel(watch: WatchTarget) -> discord.TextChannel | discord.Thread:
     channel = bot.get_channel(int(watch.channel_id))
     if channel is None:
         channel = await bot.fetch_channel(int(watch.channel_id))
     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         raise RuntimeError(f"텍스트 채널을 찾지 못했습니다: {watch.channel_id}")
+    return channel
 
-    compare_info = None
-    if previous_sha and previous_sha != latest_commit.sha:
-        session = await get_session()
-        try:
-            compare_info = await github.compare_commits(
-                session,
-                watch.repository,
-                previous_sha,
-                latest_commit.sha,
-            )
-        except Exception:
-            compare_info = None
 
-    if not should_send_alert(watch, latest_commit, compare_info):
+async def send_commit_alert(
+    watch: WatchTarget,
+    event: PushEvent,
+    channel: discord.TextChannel | discord.Thread,
+) -> bool:
+
+    if not should_send_alert(watch, event.latest_commit, event.compare_info):
         return False
 
-    embed = build_commit_embed(watch, previous_sha, latest_commit, compare_info)
+    embed = build_commit_embed(watch, event.before_sha, event.latest_commit, event.compare_info)
     await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     return True
 
 
-async def poll_watches() -> dict[str, int | bool]:
-    global poll_in_flight
-    if poll_in_flight:
-        return {
-            "watch_count": len(get_all_watches()),
-            "initialized_count": 0,
-            "changed_count": 0,
-            "error_count": 0,
-            "skipped": True,
-        }
-
-    poll_in_flight = True
-    result = {
-        "watch_count": len(get_all_watches()),
-        "initialized_count": 0,
-        "changed_count": 0,
-        "error_count": 0,
-        "skipped": False,
+def update_webhook_state(
+    guild_id: str,
+    repository: str,
+    delivery_id: str,
+    event_name: str,
+    status: str,
+) -> None:
+    webhook_states = runtime_state.setdefault("webhooks", {})
+    webhook_states[f"{guild_id}:{repository.lower()}"] = {
+        "guild_id": guild_id,
+        "repository": repository,
+        "last_delivery_id": delivery_id,
+        "last_event": event_name,
+        "last_status": status,
+        "last_received_at": int(time.time()),
     }
+    save_runtime_state(settings.state_file, runtime_state)
+
+
+def create_delivery_key(guild_id: str, delivery_id: str) -> str:
+    return f"{guild_id}:{delivery_id}"
+
+
+def mark_delivery_completed(guild_id: str, delivery_id: str) -> None:
+    deliveries = runtime_state.setdefault("deliveries", {})
+    deliveries[create_delivery_key(guild_id, delivery_id)] = int(time.time())
+    if len(deliveries) > MAX_COMPLETED_DELIVERIES:
+        oldest = sorted(deliveries, key=lambda item: int(deliveries.get(item, 0)))
+        for item in oldest[: len(deliveries) - MAX_COMPLETED_DELIVERIES]:
+            deliveries.pop(item, None)
+
+
+async def process_push_delivery(guild_id: str, delivery_id: str, event: PushEvent) -> tuple[int, int]:
+    target_guild = bot.get_guild(int(guild_id))
+    matching_watches = [
+        watch
+        for watch in get_all_watches()
+        if watch_matches_push(watch, event) and watch_belongs_to_guild(watch, target_guild)
+    ]
+    sent_count = 0
+    error_count = 0
+    for watch in matching_watches:
+        try:
+            channel = await resolve_watch_channel(watch)
+            if str(channel.guild.id) != guild_id:
+                continue
+            if await send_commit_alert(watch, event, channel):
+                sent_count += 1
+            set_head_state(watch, event.after_sha)
+            last_admin_errors.pop(create_watch_key(watch), None)
+        except Exception as error:
+            error_count += 1
+            logger.exception("webhook delivery failed for %s @ %s", watch.repository, watch.branch)
+            await send_admin_notice(
+                f"GitHub 웹훅 알림 오류\n{watch.repository} @ {watch.branch}\n{error}"
+            )
+    mark_delivery_completed(guild_id, delivery_id)
+    status = f"processed:{sent_count}"
+    if error_count:
+        status = f"partial:{sent_count}/{error_count}"
+    update_webhook_state(guild_id, event.repository, delivery_id, "push", status)
+    return sent_count, error_count
+
+
+async def webhook_worker() -> None:
+    assert webhook_queue is not None
+    await bot.wait_until_ready()
+    while True:
+        guild_id, delivery_id, event = await webhook_queue.get()
+        try:
+            await process_push_delivery(guild_id, delivery_id, event)
+        except Exception as error:
+            logger.exception("webhook worker failed for delivery %s", delivery_id)
+            update_webhook_state(guild_id, event.repository, delivery_id, "push", "failed")
+            await send_admin_notice(f"GitHub 웹훅 처리 실패\n{event.repository}\n{error}")
+        finally:
+            queued_delivery_ids.discard(create_delivery_key(guild_id, delivery_id))
+            webhook_queue.task_done()
+
+
+async def health_handler(request: web.Request) -> web.Response:
+    queue_size = webhook_queue.qsize() if webhook_queue is not None else 0
+    return web.json_response(
+        {
+            "service": "git_T_bot",
+            "status": "ok",
+            "discord_ready": bot.is_ready(),
+            "webhook_secret_configured": bool(settings.webhook_master_secret),
+            "queue_size": queue_size,
+        }
+    )
+
+
+async def github_webhook_handler(request: web.Request) -> web.Response:
+    if not settings.webhook_master_secret:
+        return web.json_response({"error": "webhook secret is not configured"}, status=503)
+
+    guild_id = request.match_info.get("guild_id", "").strip()
+    if not re.fullmatch(r"\d{17,20}", guild_id):
+        return web.json_response({"error": "invalid Discord guild id"}, status=404)
+
+    raw_payload = await request.read()
     try:
-        session = await get_session()
-        for watch in get_all_watches():
-            try:
-                latest_commit = await github.get_latest_commit(session, watch.repository, watch.branch)
-                previous_sha = str(
-                    runtime_state["branches"].get(create_watch_key(watch), {}).get("last_seen_sha", "")
-                )
+        payload = json.loads(raw_payload.decode("utf-8"))
+        repository = repository_from_payload(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        return web.json_response({"error": str(error)}, status=400)
 
-                if not previous_sha:
-                    set_head_state(watch, latest_commit.sha)
-                    result["initialized_count"] += 1
-                    continue
+    repository_secret = derive_repository_secret(settings.webhook_master_secret, repository, guild_id)
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not verify_webhook_signature(raw_payload, signature, repository_secret):
+        return web.json_response({"error": "invalid signature"}, status=401)
 
-                if previous_sha != latest_commit.sha:
-                    if await send_commit_alert(watch, previous_sha, latest_commit):
-                        result["changed_count"] += 1
+    event_name = request.headers.get("X-GitHub-Event", "").strip().lower()
+    delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
+    if not event_name or not delivery_id:
+        return web.json_response({"error": "missing GitHub delivery headers"}, status=400)
 
-                set_head_state(watch, latest_commit.sha)
-                last_admin_errors.pop(create_watch_key(watch), None)
-            except Exception as error:
-                logger.exception("watch poll failed for %s @ %s", watch.repository, watch.branch)
-                result["error_count"] += 1
-                await announce_watch_error(watch, error)
-    finally:
-        save_runtime_state(settings.state_file, runtime_state)
-        poll_in_flight = False
-    return result
+    delivery_key = create_delivery_key(guild_id, delivery_id)
+    completed_deliveries = runtime_state.setdefault("deliveries", {})
+    if delivery_key in completed_deliveries or delivery_key in queued_delivery_ids:
+        return web.json_response({"status": "duplicate"}, status=202)
+
+    if event_name == "ping":
+        update_webhook_state(guild_id, repository, delivery_id, event_name, "connected")
+        return web.json_response({"status": "connected"})
+    if event_name != "push":
+        update_webhook_state(guild_id, repository, delivery_id, event_name, "ignored")
+        return web.json_response({"status": "ignored"}, status=202)
+
+    try:
+        push_event = parse_push_event(payload)
+    except ValueError as error:
+        update_webhook_state(guild_id, repository, delivery_id, event_name, "invalid")
+        return web.json_response({"error": str(error)}, status=400)
+    if push_event is None:
+        update_webhook_state(guild_id, repository, delivery_id, event_name, "ignored_ref")
+        return web.json_response({"status": "ignored"}, status=202)
+
+    assert webhook_queue is not None
+    try:
+        webhook_queue.put_nowait((guild_id, delivery_id, push_event))
+    except asyncio.QueueFull:
+        update_webhook_state(guild_id, repository, delivery_id, event_name, "queue_full")
+        return web.json_response({"error": "webhook queue is full"}, status=503)
+    queued_delivery_ids.add(delivery_key)
+    update_webhook_state(guild_id, repository, delivery_id, event_name, "queued")
+    return web.json_response({"status": "accepted"}, status=202)
+
+
+async def start_webhook_server() -> None:
+    global webhook_queue, webhook_runner
+    webhook_queue = asyncio.Queue(maxsize=1000)
+    app = web.Application(client_max_size=25 * 1024**2)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    app.router.add_post(f"{settings.webhook_path}/{{guild_id}}", github_webhook_handler)
+    webhook_runner = web.AppRunner(app)
+    await webhook_runner.setup()
+    site = web.TCPSite(webhook_runner, settings.webhook_host, settings.webhook_port)
+    await site.start()
+    logger.info("Webhook server listening on %s:%s%s", settings.webhook_host, settings.webhook_port, settings.webhook_path)
+
+
+def start_webhook_worker() -> None:
+    global webhook_worker_task
+    if webhook_worker_task is None or webhook_worker_task.done():
+        webhook_worker_task = asyncio.create_task(webhook_worker(), name="github-webhook-worker")
+
+
+async def stop_webhook_server() -> None:
+    global webhook_runner, webhook_worker_task
+    if webhook_worker_task is not None:
+        webhook_worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await webhook_worker_task
+        webhook_worker_task = None
+    if webhook_runner is not None:
+        await webhook_runner.cleanup()
+        webhook_runner = None
 
 
 async def sync_application_commands() -> None:
@@ -484,19 +637,7 @@ async def on_ready() -> None:
     logger.info("Logged in as %s", bot.user)
     await sync_application_commands()
     if settings.startup_notify:
-        await send_admin_notice(build_startup_text(get_all_watches(), settings.poll_interval_ms))
-    if not watch_loop.is_running():
-        watch_loop.start()
-
-
-@tasks.loop(seconds=max(settings.poll_interval_ms / 1000.0, 10.0))
-async def watch_loop() -> None:
-    await poll_watches()
-
-
-@watch_loop.before_loop
-async def before_watch_loop() -> None:
-    await bot.wait_until_ready()
+        await send_admin_notice(build_startup_text(get_all_watches()))
 
 
 @bot.group(name="watch", invoke_without_command=True)
@@ -573,8 +714,17 @@ async def watch_check(ctx: commands.Context[commands.Bot]) -> None:
     if not is_authorized(ctx):
         await reply(ctx, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
         return
-    result = await poll_watches()
-    await reply(ctx, build_poll_summary_text(result))
+    queue_size = webhook_queue.qsize() if webhook_queue is not None else 0
+    await reply(
+        ctx,
+        build_webhook_status_text(
+            get_visible_watches(ctx.guild),
+            secret_configured=bool(settings.webhook_master_secret),
+            endpoint=get_webhook_endpoint(str(ctx.guild.id)) if ctx.guild else "",
+            queue_size=queue_size,
+            webhook_states=get_webhook_states_for_guild(ctx.guild),
+        ),
+    )
 
 
 @watch_group.command(name="add")
@@ -591,7 +741,7 @@ async def watch_add(
 
     try:
         normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
-        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
+        normalized_branches = normalize_branch_targets(branch)
         normalized_users, target_channel = parse_watch_extra_arguments(ctx, extra)
     except ValueError as error:
         await reply(ctx, str(error))
@@ -611,10 +761,9 @@ async def watch_add(
         await reply(ctx, build_watch_batch_added_text([], {}, existing_watches))
         return
 
-    latest_shas = await bootstrap_watches(new_watches)
     saved_watches = dedupe_watches([*saved_watches, *new_watches])
     save_persisted_watches(settings.watch_file, saved_watches)
-    await reply(ctx, build_watch_batch_added_text(new_watches, latest_shas, existing_watches))
+    await reply(ctx, build_watch_batch_added_text(new_watches, {}, existing_watches))
 
 
 @watch_group.command(name="remove")
@@ -724,6 +873,71 @@ async def github_watches_command(
     )
 
 
+@bot.tree.command(name="github_status", description="GitHub 웹훅 수신 상태를 확인합니다.")
+async def github_status_command(interaction: discord.Interaction) -> None:
+    if not is_interaction_authorized(interaction):
+        await reply_interaction(interaction, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
+        return
+    queue_size = webhook_queue.qsize() if webhook_queue is not None else 0
+    await reply_interaction(
+        interaction,
+        build_webhook_status_text(
+            get_visible_watches(interaction.guild),
+            secret_configured=bool(settings.webhook_master_secret),
+            endpoint=get_webhook_endpoint(str(interaction.guild.id)) if interaction.guild else "",
+            queue_size=queue_size,
+            webhook_states=get_webhook_states_for_guild(interaction.guild),
+        ),
+    )
+
+
+@bot.tree.command(name="github_webhook_setup", description="저장소에 등록할 GitHub 웹훅 정보를 발급합니다.")
+@app_commands.describe(repository="owner/repo 형식의 GitHub 저장소입니다.")
+async def github_webhook_setup_command(
+    interaction: discord.Interaction,
+    repository: str,
+) -> None:
+    if not is_interaction_authorized(interaction):
+        await reply_interaction(interaction, "이 명령은 허용된 관리 채널과 역할에서만 사용할 수 있습니다.")
+        return
+    try:
+        normalized_repository = normalize_repository_targets(repository, allow_wildcard=False)
+    except ValueError as error:
+        await reply_interaction(interaction, str(error))
+        return
+    if len(normalized_repository) != 1:
+        await reply_interaction(interaction, "웹훅 설정 정보는 저장소를 한 번에 하나씩 발급해 주세요.")
+        return
+    if interaction.guild is None:
+        await reply_interaction(interaction, "Discord 서버에서만 웹훅 설정을 발급할 수 있습니다.")
+        return
+    guild_id = str(interaction.guild.id)
+    endpoint = get_webhook_endpoint(guild_id)
+    if not endpoint:
+        await reply_interaction(interaction, "호스팅 환경에 GITHUB_WEBHOOK_PUBLIC_URL을 먼저 설정해 주세요.")
+        return
+    if not settings.webhook_master_secret:
+        await reply_interaction(interaction, "호스팅 환경에 GITHUB_WEBHOOK_MASTER_SECRET을 먼저 설정해 주세요.")
+        return
+
+    repository_name = normalized_repository[0]
+    secret = derive_repository_secret(settings.webhook_master_secret, repository_name, guild_id)
+    await reply_interaction(
+        interaction,
+        "\n".join(
+            [
+                f"GitHub 웹훅 설정: {repository_name}",
+                f"Payload URL: `{endpoint}`",
+                "Content type: `application/json`",
+                f"Secret: `{secret}`",
+                "이벤트: `Just the push event`",
+                "SSL verification: Enable",
+                "Secret은 외부에 공유하거나 Git에 저장하지 마세요.",
+            ]
+        ),
+    )
+
+
 @bot.tree.command(name="github_branches", description="저장소의 GitHub 브랜치와 감시 연결 상태를 조회합니다.")
 @app_commands.describe(
     repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
@@ -766,7 +980,7 @@ async def github_branches_command(
 @bot.tree.command(name="github_watch", description="GitHub 저장소의 push 알림을 현재 채널에 등록합니다.")
 @app_commands.describe(
     repository="owner/repo 형식. 여러 개는 쉼표로 구분합니다.",
-    branch="실제 감시할 브랜치명. 여러 개는 쉼표로 구분합니다.",
+    branch="브랜치명 또는 *. 여러 개는 쉼표로 구분합니다.",
     user="GitHub 사용자명 또는 *. 여러 개는 쉼표로 구분합니다.",
     channel="비워두면 현재 채널을 사용합니다.",
 )
@@ -788,7 +1002,7 @@ async def github_watch_command(
 
     try:
         normalized_repositories = normalize_repository_targets(repository, allow_wildcard=False)
-        normalized_branches = normalize_branch_targets(branch, allow_wildcard=False)
+        normalized_branches = normalize_branch_targets(branch)
         normalized_users = normalize_user_filters(user)
     except ValueError as error:
         await reply_interaction(interaction, str(error))
@@ -814,10 +1028,9 @@ async def github_watch_command(
         await reply_interaction(interaction, build_watch_batch_added_text([], {}, existing_watches))
         return
 
-    latest_shas = await bootstrap_watches(new_watches)
     saved_watches = dedupe_watches([*saved_watches, *new_watches])
     save_persisted_watches(settings.watch_file, saved_watches)
-    await reply_interaction(interaction, build_watch_batch_added_text(new_watches, latest_shas, existing_watches))
+    await reply_interaction(interaction, build_watch_batch_added_text(new_watches, {}, existing_watches))
 
 
 @bot.tree.command(name="github_unwatch", description="현재 채널에서 GitHub 저장소 감시를 해제합니다.")

@@ -10,11 +10,15 @@ env:
   DISCORD_ADMIN_CHANNEL_ID: ""
   DISCORD_ALLOWED_ROLE_IDS: ""
   GITHUB_TOKEN: ""
-  WATCH_POLL_INTERVAL_MS: "20000"
-  WATCH_TARGETS: "rupria/rupria_tools_bot_etc|main|YOUR_CHANNEL_ID"
+  GITHUB_WEBHOOK_MASTER_SECRET: ""
+  GITHUB_WEBHOOK_PUBLIC_URL: ""
+  GITHUB_WEBHOOK_PATH: "/webhooks/github"
+  WEBHOOK_HOST: "0.0.0.0"
+  WEBHOOK_PORT: "8080"
+  WATCH_TARGETS: ""
   COMMAND_PREFIX: "!"
   STARTUP_NOTIFY: "true"
   PY_PACKAGES: "discord.py aiohttp python-dotenv"
 git:
   autoDeploy: true
-  branch: main
+  branch: dev

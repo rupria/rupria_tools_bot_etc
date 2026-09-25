@@ -34,8 +34,8 @@ class CompareCommitInfo:
 @dataclass(frozen=True)
 class ChangedFileInfo:
     filename: str
-    additions: int
-    deletions: int
+    additions: int | None
+    deletions: int | None
     status: str
 
 
