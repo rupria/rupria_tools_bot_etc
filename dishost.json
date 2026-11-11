@@ -1,0 +1,11 @@
+{
+  "name": "gtb",
+  "language": "python",
+  "entrypoint": "bots/git_T_bot/main.py",
+  "env": {
+    "POLLING_ENABLED": "true",
+    "WATCH_POLL_INTERVAL_MS": "20000",
+    "COMMAND_PREFIX": "!",
+    "STARTUP_NOTIFY": "true"
+  }
+}
