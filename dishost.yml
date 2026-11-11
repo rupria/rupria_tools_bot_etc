@@ -4,6 +4,13 @@ startup: python bots/git_T_bot/main.py
 memory: 256
 cpu: 25
 disk: 512
+env:
+  PORT: "8080"
+  WEBHOOK_HOST: "0.0.0.0"
+  GITHUB_WEBHOOK_PATH: "/github/webhook"
+  POLLING_ENABLED: "false"
+  WATCH_POLL_INTERVAL_MS: "60000"
+  PY_PACKAGES: "discord.py aiohttp python-dotenv"
 git:
   autoDeploy: true
   branch: main

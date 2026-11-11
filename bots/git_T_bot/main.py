@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 import re
 
 import aiohttp
+from aiohttp import web
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -18,7 +21,7 @@ from git_t_bot.config import (
     normalize_repository_targets,
     normalize_user_targets,
 )
-from git_t_bot.github_client import GitHubClient
+from git_t_bot.github_client import CommitInfo, CompareInfo, GitHubClient
 from git_t_bot.messages import (
     build_branch_list_text,
     build_commit_embed,
@@ -37,6 +40,7 @@ from git_t_bot.storage import (
     save_persisted_watches,
     save_runtime_state,
 )
+from git_t_bot.webhook import PushInfo, ZERO_SHA, parse_push_payload, verify_github_signature
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -60,7 +64,11 @@ async def close_http_session() -> None:
 
 
 class GitTBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        await start_webhook_server()
+
     async def close(self) -> None:
+        await close_webhook_server()
         await close_http_session()
         await super().close()
 
@@ -72,6 +80,9 @@ runtime_state = load_runtime_state(settings.state_file)
 last_admin_errors: dict[str, str] = {}
 poll_in_flight = False
 http_session: aiohttp.ClientSession | None = None
+webhook_runner: web.AppRunner | None = None
+webhook_tasks: set[asyncio.Task[None]] = set()
+active_delivery_ids: set[str] = set()
 CHANNEL_MENTION_PATTERN = re.compile(r"^<#(\d{17,20})>$")
 
 
@@ -363,6 +374,181 @@ async def get_session() -> aiohttp.ClientSession:
     return http_session
 
 
+async def get_compare_info(repository: str, previous_sha: str, latest_sha: str) -> CompareInfo | None:
+    if not previous_sha or previous_sha == ZERO_SHA or previous_sha == latest_sha:
+        return None
+    session = await get_session()
+    try:
+        return await github.compare_commits(session, repository, previous_sha, latest_sha)
+    except Exception:
+        logger.exception("commit comparison failed for %s: %s...%s", repository, previous_sha, latest_sha)
+        return None
+
+
+def is_duplicate_delivery(delivery_id: str) -> bool:
+    if not delivery_id:
+        return False
+    deliveries = runtime_state.get("deliveries", [])
+    if not isinstance(deliveries, list):
+        deliveries = []
+    return delivery_id in deliveries or delivery_id in active_delivery_ids
+
+
+def record_delivery(delivery_id: str) -> None:
+    if not delivery_id:
+        return
+    deliveries = runtime_state.get("deliveries", [])
+    if not isinstance(deliveries, list):
+        deliveries = []
+    deliveries.append(delivery_id)
+    runtime_state["deliveries"] = deliveries[-100:]
+    save_runtime_state(settings.state_file, runtime_state)
+
+
+def matching_push_watches(push: PushInfo) -> list[WatchTarget]:
+    return [
+        watch
+        for watch in get_all_watches()
+        if watch.repository.lower() == push.repository.lower()
+        and watch.branch.lower() == push.branch.lower()
+    ]
+
+
+async def process_push(push: PushInfo, delivery_id: str) -> bool:
+    await bot.wait_until_ready()
+    watches = matching_push_watches(push)
+    if not watches:
+        logger.info("ignored unregistered push %s @ %s", push.repository, push.branch)
+        return True
+
+    compare_info = await get_compare_info(push.repository, push.before_sha, push.after_sha)
+    succeeded = True
+    try:
+        for watch in watches:
+            key = create_watch_key(watch)
+            previous_state_sha = str(runtime_state["branches"].get(key, {}).get("last_seen_sha", ""))
+            if previous_state_sha == push.after_sha:
+                continue
+            previous_sha = push.before_sha if push.before_sha != ZERO_SHA else previous_state_sha
+            try:
+                if await send_commit_alert(watch, previous_sha, push.latest_commit, compare_info):
+                    logger.info(
+                        "webhook alert sent for %s @ %s (%s)",
+                        watch.repository,
+                        watch.branch,
+                        delivery_id or "no-delivery-id",
+                    )
+                set_head_state(watch, push.after_sha)
+                last_admin_errors.pop(key, None)
+            except Exception as error:
+                succeeded = False
+                logger.exception("webhook delivery failed for %s @ %s", watch.repository, watch.branch)
+                await announce_watch_error(watch, error)
+    finally:
+        save_runtime_state(settings.state_file, runtime_state)
+    return succeeded
+
+
+async def process_delivery(push: PushInfo, delivery_id: str) -> None:
+    try:
+        if await process_push(push, delivery_id):
+            record_delivery(delivery_id)
+    finally:
+        active_delivery_ids.discard(delivery_id)
+
+
+def finish_webhook_task(task: asyncio.Task[None]) -> None:
+    webhook_tasks.discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("webhook background task failed: %s", error)
+
+
+async def handle_health(_: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "status": "ok",
+            "discord_ready": bot.is_ready(),
+            "notification_mode": "webhook" if not settings.polling_enabled else "webhook+polling",
+            "watch_count": len(get_all_watches()),
+        }
+    )
+
+
+async def handle_github_webhook(request: web.Request) -> web.Response:
+    payload_bytes = await request.read()
+    if not settings.webhook_secret:
+        return web.json_response({"status": "unavailable", "reason": "webhook secret is not set"}, status=503)
+    if not verify_github_signature(
+        payload_bytes,
+        settings.webhook_secret,
+        request.headers.get("X-Hub-Signature-256", ""),
+    ):
+        return web.json_response({"status": "rejected", "reason": "invalid signature"}, status=403)
+
+    event = request.headers.get("X-GitHub-Event", "")
+    if event == "ping":
+        return web.json_response({"status": "ok", "event": "ping"})
+    if event != "push":
+        return web.json_response({"status": "ignored", "event": event}, status=202)
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return web.json_response({"status": "rejected", "reason": "invalid json"}, status=400)
+
+    push = parse_push_payload(payload)
+    if push is None:
+        return web.json_response({"status": "ignored", "reason": "not a branch push"}, status=202)
+
+    delivery_id = request.headers.get("X-GitHub-Delivery", "")
+    if is_duplicate_delivery(delivery_id):
+        return web.json_response({"status": "ignored", "reason": "duplicate delivery"}, status=202)
+
+    if delivery_id:
+        active_delivery_ids.add(delivery_id)
+    task = asyncio.create_task(process_delivery(push, delivery_id))
+    webhook_tasks.add(task)
+    task.add_done_callback(finish_webhook_task)
+    return web.json_response({"status": "accepted"}, status=202)
+
+
+async def start_webhook_server() -> None:
+    global webhook_runner
+    if webhook_runner is not None:
+        return
+    app = web.Application(client_max_size=2 * 1024 * 1024)
+    app.router.add_get("/health", handle_health)
+    app.router.add_post(settings.webhook_path, handle_github_webhook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    try:
+        site = web.TCPSite(runner, settings.webhook_host, settings.webhook_port)
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
+    webhook_runner = runner
+    logger.info("webhook server listening on %s:%s%s", settings.webhook_host, settings.webhook_port, settings.webhook_path)
+    if not settings.webhook_secret:
+        logger.warning("GITHUB_WEBHOOK_SECRET is empty; webhook requests will be rejected")
+
+
+async def close_webhook_server() -> None:
+    global webhook_runner
+    for task in tuple(webhook_tasks):
+        task.cancel()
+    if webhook_tasks:
+        await asyncio.gather(*webhook_tasks, return_exceptions=True)
+    webhook_tasks.clear()
+    active_delivery_ids.clear()
+    if webhook_runner is not None:
+        await webhook_runner.cleanup()
+    webhook_runner = None
+
+
 async def bootstrap_watches(watches: list[WatchTarget]) -> dict[str, str]:
     session = await get_session()
     cached_heads: dict[tuple[str, str], str] = {}
@@ -389,25 +575,17 @@ async def announce_watch_error(watch: WatchTarget, error: Exception) -> None:
     await send_admin_notice(f"GitHub 감시 오류\n{watch.repository} @ {watch.branch}\n{error}")
 
 
-async def send_commit_alert(watch: WatchTarget, previous_sha: str, latest_commit) -> bool:
+async def send_commit_alert(
+    watch: WatchTarget,
+    previous_sha: str,
+    latest_commit: CommitInfo,
+    compare_info: CompareInfo | None = None,
+) -> bool:
     channel = bot.get_channel(int(watch.channel_id))
     if channel is None:
         channel = await bot.fetch_channel(int(watch.channel_id))
     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         raise RuntimeError(f"텍스트 채널을 찾지 못했습니다: {watch.channel_id}")
-
-    compare_info = None
-    if previous_sha and previous_sha != latest_commit.sha:
-        session = await get_session()
-        try:
-            compare_info = await github.compare_commits(
-                session,
-                watch.repository,
-                previous_sha,
-                latest_commit.sha,
-            )
-        except Exception:
-            compare_info = None
 
     if not should_send_alert(watch, latest_commit, compare_info):
         return False
@@ -451,7 +629,8 @@ async def poll_watches() -> dict[str, int | bool]:
                     continue
 
                 if previous_sha != latest_commit.sha:
-                    if await send_commit_alert(watch, previous_sha, latest_commit):
+                    compare_info = await get_compare_info(watch.repository, previous_sha, latest_commit.sha)
+                    if await send_commit_alert(watch, previous_sha, latest_commit, compare_info):
                         result["changed_count"] += 1
 
                 set_head_state(watch, latest_commit.sha)
@@ -485,7 +664,7 @@ async def on_ready() -> None:
     await sync_application_commands()
     if settings.startup_notify:
         await send_admin_notice(build_startup_text(get_all_watches(), settings.poll_interval_ms))
-    if not watch_loop.is_running():
+    if settings.polling_enabled and not watch_loop.is_running():
         watch_loop.start()
 
 

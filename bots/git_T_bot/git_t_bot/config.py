@@ -40,7 +40,12 @@ class Settings:
     admin_channel_id: str
     allowed_role_ids: tuple[str, ...]
     github_token: str
+    polling_enabled: bool
     poll_interval_ms: int
+    webhook_secret: str
+    webhook_host: str
+    webhook_port: int
+    webhook_path: str
     startup_watches: tuple[WatchTarget, ...]
     command_prefix: str
     startup_notify: bool
@@ -201,9 +206,17 @@ def load_settings(project_root: Path) -> Settings:
     if admin_channel_id:
         normalize_channel_id(admin_channel_id)
 
-    poll_interval_ms = int(os.getenv("WATCH_POLL_INTERVAL_MS", "20000"))
+    poll_interval_ms = int(os.getenv("WATCH_POLL_INTERVAL_MS", "60000"))
     if poll_interval_ms < 10000:
         raise RuntimeError("WATCH_POLL_INTERVAL_MS는 10000 이상이어야 합니다.")
+
+    webhook_port = int(os.getenv("PORT", os.getenv("WEBHOOK_PORT", "8080")))
+    if not 1 <= webhook_port <= 65535:
+        raise RuntimeError("PORT 또는 WEBHOOK_PORT는 1~65535 범위여야 합니다.")
+
+    webhook_path = os.getenv("GITHUB_WEBHOOK_PATH", "/github/webhook").strip()
+    if not webhook_path.startswith("/"):
+        webhook_path = f"/{webhook_path}"
 
     data_dir = project_root / "data"
     return Settings(
@@ -212,7 +225,12 @@ def load_settings(project_root: Path) -> Settings:
         admin_channel_id=admin_channel_id,
         allowed_role_ids=parse_csv_list(os.getenv("DISCORD_ALLOWED_ROLE_IDS", "")),
         github_token=os.getenv("GITHUB_TOKEN", "").strip(),
+        polling_enabled=parse_bool(os.getenv("POLLING_ENABLED", "false"), False),
         poll_interval_ms=poll_interval_ms,
+        webhook_secret=os.getenv("GITHUB_WEBHOOK_SECRET", "").strip(),
+        webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        webhook_port=webhook_port,
+        webhook_path=webhook_path,
         startup_watches=parse_watch_targets(os.getenv("WATCH_TARGETS", "")),
         command_prefix=os.getenv("COMMAND_PREFIX", "!").strip() or "!",
         startup_notify=parse_bool(os.getenv("STARTUP_NOTIFY", "true"), True),

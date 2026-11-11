@@ -49,11 +49,14 @@ def save_persisted_watches(file_path: Path, watches: list[WatchTarget]) -> None:
 
 
 def load_runtime_state(file_path: Path) -> dict:
-    data = read_json_file(file_path, {"version": 1, "branches": {}})
+    data = read_json_file(file_path, {"version": 1, "branches": {}, "deliveries": []})
     branches = data.get("branches", {})
     if not isinstance(branches, dict):
         branches = {}
-    return {"version": 1, "branches": branches}
+    deliveries = data.get("deliveries", [])
+    if not isinstance(deliveries, list):
+        deliveries = []
+    return {"version": 1, "branches": branches, "deliveries": deliveries[-100:]}
 
 
 def save_runtime_state(file_path: Path, state: dict) -> None:
