@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import math
 import time
@@ -67,6 +68,8 @@ class GitHubClient:
         self.last_error = ""
         self.rate_remaining = ""
         self.rate_reset = ""
+        self.response_cache: dict[str, tuple[str, object]] = {}
+        self.transient_failures = 0
 
     @staticmethod
     def _retry_after_seconds(response: aiohttp.ClientResponse) -> int:
@@ -86,6 +89,22 @@ class GitHubClient:
             return GitHubClient._retry_after_seconds(response)
         return 0
 
+    def _next_transient_backoff(self) -> int:
+        self.transient_failures += 1
+        return min(15 * (2 ** (self.transient_failures - 1)), 300)
+
+    def _block_requests(self, status: int | None, retry_after: int) -> None:
+        self.blocked_until = time.monotonic() + retry_after
+        self.blocked_status = status
+
+    def _record_success(self, status: int) -> None:
+        self.blocked_until = 0.0
+        self.blocked_status = None
+        self.transient_failures = 0
+        self.last_status = status
+        self.last_success_at = time.time()
+        self.last_error = ""
+
     def health_snapshot(self) -> dict[str, object]:
         retry_after = max(math.ceil(self.blocked_until - time.monotonic()), 0)
         return {
@@ -103,7 +122,7 @@ class GitHubClient:
         remaining_backoff = self.blocked_until - time.monotonic()
         if remaining_backoff > 0:
             retry_after = math.ceil(remaining_backoff)
-            status = self.blocked_status or 429
+            status = self.blocked_status if self.blocked_status is not None else 503
             raise GitHubApiError(
                 f"GitHub API 재시도 대기 중입니다. {retry_after}초 후 다시 확인합니다.",
                 status=status,
@@ -116,28 +135,43 @@ class GitHubClient:
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        cached_response = self.response_cache.get(endpoint)
+        if cached_response and cached_response[0]:
+            headers["If-None-Match"] = cached_response[0]
         self.last_request_at = time.time()
-        async with session.get(f"https://api.github.com{endpoint}", headers=headers, timeout=20) as response:
-            self.last_status = response.status
-            self.rate_remaining = response.headers.get("X-RateLimit-Remaining", "")
-            self.rate_reset = response.headers.get("X-RateLimit-Reset", "")
-            if response.status >= 400:
-                detail = await response.text()
-                retry_after = self._backoff_seconds_for_status(response)
-                if retry_after:
-                    self.blocked_until = time.monotonic() + retry_after
-                    self.blocked_status = response.status
-                self.last_error = f"GitHub API 요청 실패 ({response.status}): {detail[:300]}"
-                raise GitHubApiError(
-                    self.last_error,
-                    status=response.status,
-                    retry_after=retry_after,
-                )
-            self.blocked_until = 0.0
-            self.blocked_status = None
-            self.last_success_at = time.time()
-            self.last_error = ""
-            return await response.json()
+        try:
+            async with session.get(f"https://api.github.com{endpoint}", headers=headers, timeout=20) as response:
+                self.last_status = response.status
+                self.rate_remaining = response.headers.get("X-RateLimit-Remaining", "")
+                self.rate_reset = response.headers.get("X-RateLimit-Reset", "")
+                if response.status == 304 and cached_response:
+                    self._record_success(response.status)
+                    return cached_response[1]
+                if response.status >= 400:
+                    detail = await response.text()
+                    retry_after = self._backoff_seconds_for_status(response)
+                    if response.status >= 500:
+                        retry_after = self._next_transient_backoff()
+                    if retry_after:
+                        self._block_requests(response.status, retry_after)
+                    self.last_error = f"GitHub API 요청 실패 ({response.status}): {detail[:300]}"
+                    raise GitHubApiError(
+                        self.last_error,
+                        status=response.status,
+                        retry_after=retry_after,
+                    )
+                data = await response.json()
+                etag = response.headers.get("ETag", "").strip()
+                if etag:
+                    self.response_cache[endpoint] = (etag, data)
+                self._record_success(response.status)
+                return data
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            retry_after = self._next_transient_backoff()
+            self._block_requests(None, retry_after)
+            self.last_status = None
+            self.last_error = f"GitHub API 연결 실패: {error}"
+            raise GitHubApiError(self.last_error, retry_after=retry_after) from error
 
     async def get_default_branch(self, session: aiohttp.ClientSession, repository: str) -> str:
         owner, repo = repository.split("/", 1)
