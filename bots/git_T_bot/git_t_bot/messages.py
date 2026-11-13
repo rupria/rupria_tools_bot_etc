@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import discord
 
 from .config import WatchTarget, create_watch_key
@@ -71,9 +72,6 @@ def build_author_summary(latest_commit: CommitInfo, compare_info: CompareInfo | 
 
 def format_changed_file_line(changed_file: ChangedFileInfo) -> str:
     file_name = truncate(changed_file.filename, 72)
-    if changed_file.additions is None or changed_file.deletions is None:
-        status_labels = {"added": "추가", "removed": "삭제", "modified": "수정"}
-        return f"`{file_name}` ({status_labels.get(changed_file.status, '변경')})"
     return f"`{file_name}` +{changed_file.additions} / -{changed_file.deletions}"
 
 
@@ -145,9 +143,8 @@ def build_commit_embed(
         value=build_author_summary(latest_commit, compare_info),
         inline=False,
     )
-    has_line_counts = bool(compare_info and any(item.additions is not None for item in compare_info.files))
     embed.add_field(
-        name="변경 파일 · 줄 수" if has_line_counts else "변경 파일",
+        name="변경 파일 · 줄 수",
         value="\n".join(build_file_summary_lines(compare_info)),
         inline=False,
     )
@@ -158,7 +155,7 @@ def build_commit_embed(
     )
     if latest_commit.committed_at:
         embed.timestamp = discord.utils.parse_time(latest_commit.committed_at)
-    embed.set_footer(text="GitHub 웹훅 기반 중앙 감시 봇")
+    embed.set_footer(text="중앙 GitHub 감시 봇. 대상 저장소 설치 불필요")
     return embed
 
 
@@ -172,12 +169,11 @@ def build_help_text(prefix: str) -> str:
             f"{prefix}watch remove owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]",
             f"{prefix}watch check",
             f"{prefix}watch test [#channel]",
-            "/github_webhook_setup repository:owner/repo",
-            "/github_status",
+            "/github_watch repository:owner/repo branch:main user:* channel:#channel",
+            "/github_unwatch repository:owner/repo branch:main user:* channel:#channel",
             "/github_watches repository:* branch:* user:*",
-            "/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate",
-            "/github_watch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
-            "/github_unwatch repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate channel:#alerts",
+            "/github_branches repository:owner/repo branch:* user:*",
+            "/github_status",
         ]
     )
 
@@ -283,11 +279,11 @@ def build_repository_branch_catalog_text(
     return "\n".join(lines)
 
 
-def build_startup_text(_watches: list[WatchTarget]) -> str:
+def build_startup_text(watches: list[WatchTarget], poll_interval_ms: int = 20000) -> str:
     return "git_T_bot 실행됨"
 
 
-def build_watch_added_text(watch: WatchTarget, latest_sha: str = "") -> str:
+def build_watch_added_text(watch: WatchTarget, latest_sha: str) -> str:
     lines = [
         "감시를 추가했습니다.",
         f"레포지토리 : {watch.repository}",
@@ -295,7 +291,10 @@ def build_watch_added_text(watch: WatchTarget, latest_sha: str = "") -> str:
         f"감지 사용자 : {format_watch_user(watch.user)}",
         f"채널 : <#{watch.channel_id}>",
     ]
-    lines.append(f"기준 SHA: {short_sha(latest_sha)}" if latest_sha else "웹훅 상태: 수신 대기")
+    if latest_sha:
+        lines.append(f"기준 SHA: {short_sha(latest_sha)}")
+    else:
+        lines.append("상태: 다음 폴링에서 기준 커밋 초기화")
     return "\n".join(lines)
 
 
@@ -376,24 +375,54 @@ def build_watch_batch_removed_text(
     return "\n".join(lines)
 
 
-def build_webhook_status_text(
+def build_poll_summary_text(result: dict[str, int | bool]) -> str:
+    if result.get("skipped"):
+        return "이미 점검이 진행 중이라 이번 요청은 건너뛰었습니다."
+    return "\n".join(
+        [
+            "점검 완료",
+            f"감시 대상: {result['watch_count']}개",
+            f"초기화: {result['initialized_count']}개",
+            f"새 알림: {result['changed_count']}개",
+            f"오류: {result['error_count']}개",
+        ]
+    )
+
+
+def format_health_time(value: object) -> str:
+    if not isinstance(value, (int, float)) or value <= 0:
+        return "없음"
+    return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def build_polling_status_text(
     watches: list[WatchTarget],
     *,
-    secret_configured: bool,
-    endpoint: str,
-    queue_size: int,
-    webhook_states: dict,
+    polling_enabled: bool,
+    poll_interval_ms: int,
+    token_configured: bool,
+    loop_running: bool,
+    poll_health: dict[str, object],
+    api_health: dict[str, object],
 ) -> str:
-    connected_repositories = sum(
-        1 for state in webhook_states.values() if isinstance(state, dict) and state.get("last_received_at")
-    )
+    unique_branches = {(watch.repository.lower(), watch.branch.lower()) for watch in watches}
+    last_error = str(poll_health.get("last_error") or api_health.get("last_error") or "없음")
     lines = [
-        "GitHub 웹훅 상태",
-        f"수신 서버: {'정상' if secret_configured else '비밀키 설정 필요'}",
-        f"감시 대상: {len(watches)}개",
-        f"수신 확인 저장소: {connected_repositories}개",
-        f"처리 대기: {queue_size}개",
+        "git_T_bot 상태",
+        f"폴링: {'실행 중' if polling_enabled and loop_running else '중지'} ({poll_interval_ms // 1000}초)",
+        f"GitHub 토큰: {'설정됨' if token_configured else '미설정'}",
+        f"이 서버 감시: {len(watches)}개 / 저장소·브랜치 {len(unique_branches)}개",
+        f"최근 폴링 완료: {format_health_time(poll_health.get('last_finished_at'))}",
+        f"최근 정상 조회: {format_health_time(api_health.get('last_success_at'))}",
     ]
-    if endpoint:
-        lines.append(f"Payload URL: {endpoint}")
+    last_status = api_health.get("last_status")
+    if last_status is not None:
+        lines.append(f"최근 GitHub 응답: HTTP {last_status}")
+    rate_remaining = str(api_health.get("rate_remaining") or "")
+    if rate_remaining:
+        lines.append(f"API 잔여 요청: {rate_remaining}")
+    retry_after = int(api_health.get("retry_after") or 0)
+    if retry_after:
+        lines.append(f"재시도 대기: {retry_after}초")
+    lines.append(f"최근 오류: {truncate(last_error, 220)}")
     return "\n".join(lines)

@@ -7,12 +7,12 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
+os.environ.setdefault("GITHUB_TOKEN", "test-token")
 bot_main = importlib.import_module("main")
 
 
@@ -63,6 +63,22 @@ class DummyInteraction:
 
 
 class AuthorizationTests(unittest.TestCase):
+    def test_slash_command_shape_includes_branch_user_and_channel(self) -> None:
+        commands = {
+            command.name: [parameter.name for parameter in command.parameters]
+            for command in bot_main.bot.tree.get_commands()
+        }
+        self.assertEqual(
+            commands,
+            {
+                "github_watches": ["repository", "branch", "user"],
+                "github_status": [],
+                "github_branches": ["repository", "branch", "user"],
+                "github_watch": ["repository", "branch", "user", "channel"],
+                "github_unwatch": ["repository", "branch", "user", "channel"],
+            },
+        )
+
     def setUp(self) -> None:
         self.original_settings = bot_main.settings
         bot_main.settings = replace(

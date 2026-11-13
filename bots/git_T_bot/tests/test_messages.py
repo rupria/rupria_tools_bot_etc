@@ -11,6 +11,7 @@ from git_t_bot.messages import (
     build_commit_embed,
     build_help_text,
     build_list_text,
+    build_polling_status_text,
     build_repository_branch_catalog_text,
     build_startup_text,
     build_watch_added_text,
@@ -110,7 +111,7 @@ class MessageTests(unittest.TestCase):
     def test_build_help_text(self) -> None:
         text = build_help_text("!")
         self.assertIn("!watch add owner/repo[,owner/repo] branch[,branch] [user[,user]] [#channel]", text)
-        self.assertIn("/github_branches repository:owner/repo[,owner/repo] branch:main,test user:rupria,teammate", text)
+        self.assertIn("/github_watch repository:owner/repo branch:main user:* channel:#channel", text)
 
     def test_build_startup_text(self) -> None:
         text = build_startup_text(
@@ -131,7 +132,28 @@ class MessageTests(unittest.TestCase):
     def test_build_watch_batch_added_text_without_api_bootstrap(self) -> None:
         watch = WatchTarget("rupria/gitproject", "dev", "12345678901234567", user="*")
         text = build_watch_batch_added_text([watch], {}, [])
-        self.assertIn("웹훅 상태: 수신 대기", text)
+        self.assertIn("상태: 다음 폴링에서 기준 커밋 초기화", text)
+
+    def test_build_polling_status_text_includes_failure_details(self) -> None:
+        text = build_polling_status_text(
+            [WatchTarget("rupria/gitproject", "dev", "12345678901234567")],
+            polling_enabled=True,
+            poll_interval_ms=20000,
+            token_configured=True,
+            loop_running=True,
+            poll_health={"last_finished_at": 0, "last_error": ""},
+            api_health={
+                "last_success_at": 0,
+                "last_status": 401,
+                "last_error": "Bad credentials",
+                "retry_after": 300,
+                "rate_remaining": "",
+            },
+        )
+        self.assertIn("폴링: 실행 중 (20초)", text)
+        self.assertIn("HTTP 401", text)
+        self.assertIn("재시도 대기: 300초", text)
+        self.assertIn("Bad credentials", text)
 
     def test_build_watch_batch_removed_text(self) -> None:
         removed = [WatchTarget("rupria/gitproject", "main", "12345678901234567", user="*")]

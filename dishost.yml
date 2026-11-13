@@ -4,6 +4,10 @@ startup: python bots/git_T_bot/main.py
 memory: 256
 cpu: 25
 disk: 512
+env:
+  POLLING_ENABLED: "true"
+  WATCH_POLL_INTERVAL_MS: "20000"
+  PY_PACKAGES: "discord.py aiohttp python-dotenv"
 git:
   autoDeploy: true
-  branch: main
+  branch: dev
